@@ -1,0 +1,600 @@
+
+
+===== PAGE 1 =====
+
+Editing Music with Melody and Text:
+Using ControlNet for Diffusion Transformer
+Siyuan Hou 1,2, Shansong Liu 2, Ruibin Yuan 3, Wei Xue 3, Ying Shan 2, Mangsuo Zhao 1, Chao Zhang 1,∗
+1 Tsinghua University , 2 ARC Lab, Tencent PCG , 3 Hong Kong University of Science and Technology
+housy24@mails.tsinghua.edu.cn; shansongliu@tencent.com; cz277@tsinghua.edu.cn
+Abstract—Despite the significant progress in controllable music gen-
+eration and editing, challenges remain in the quality and length of
+generated music due to the use of Mel-spectrogram representations and
+UNet-based model structures. To address these limitations, we propose
+a novel approach using a Diffusion Transformer (DiT) augmented with
+an additional control branch using ControlNet. This allows for long-
+form and variable-length music generation and editing controlled by text
+and melody prompts. For more precise and fine-grained melody control,
+we introduce a novel top- k constant-Q Transform representation as the
+melody prompt, reducing ambiguity compared to previous representa-
+tions (e.g., chroma), particularly for music with multiple tracks or a
+wide range of pitch values. To effectively balance the control signals
+from text and melody prompts, we adopt a curriculum learning strategy
+that progressively masks the melody prompt, resulting in a more stable
+training process. Experiments have been performed on text-to-music
+generation and music-style transfer tasks using open-source instrumental
+recording data. The results demonstrate that by extending StableAudio,
+a pre-trained text-controlled DiT model, our approach enables superior
+melody-controlled editing while retaining good text-to-music generation
+performance. These results outperform a strong MusicGen baseline in
+terms of both text-based generation and melody preservation for editing.
+Audio examples can be found at https://stable-audio-control.github.io.
+I. I NTRODUCTION
+With the rapid development of deep generative models, signifi-
+cant progress has been made in text-guided generation tasks across
+multiple modalities, including text-to-image, text-to-audio, and text-
+to-video. In the realm of text-to-music generation, several models,
+such as MusicLM [1], MusicGen [2], JASCO [3], and JEN-1 [4],
+have shown to produce high-quality music based on textual prompts,
+which typically describe a more abstract and high-level form of
+global attributes, such as style, theme, and genre [5]. Additionally,
+some models have explored more flexible conditioning mechanisms
+in music generation tasks, such as conditioning on musical audio
+contexts [6]–[9]. Recently, efforts in music editing have emerged,
+including Coco-Mulla [10] and DITTO [11], that use temporally
+aligned music prompts to achieve greater flexibility in controlling
+the finer attributes of the generated music.
+Existing music generation models face two limitations. First, the
+use of UNet-based Diffusion models [12]–[14] to generate music via
+Mel-spectrogram representations imposes significant constraints on
+both the length and quality of the generated music. The fixed-length
+output of spectrograms, required to accommodate the 2D convolution
+structure and downsampling factors, hinders the generation of precise,
+variable-length audio. Additionally, converting Mel-spectrograms to
+waveforms via a separately trained vocoder often introduces errors
+during the conversion process, which further degrades the quality of
+the final audio output. Second, many existing methods use melody
+prompts that fail to include complete melody information, leading to
+poor melody retention. For instance, Music ControlNet [5] employs
+a one-hot 12-pitch-class chromagram as the melody prompt, which
+∗Corresponding author. This work was done when Siyuan Hou was an
+intern at Tencent ARC Lab.
+cannot accurately capture pitch changes across multiple octaves and
+struggles to represent the melody of multi-track music effectively.
+To address the aforementioned challenges, we propose an improved
+controllable music editing model designed to generate music based on
+both text and melody prompts. Inspired by the StableAudio models
+[15], [16], we adopt the Diffusion Transformer (DiT) model struc-
+ture with a timing conditioning method as the primary framework,
+enabling the generation of variable-length music. For precise melody
+control, a control branch based on ControlNet is introduced, following
+the approach used in Music ControlNet [5], to adapt the Diffusion
+component of the DiT model. In contrast to the chroma features
+commonly used in previous studies, we propose to use a top- k
+constant-Q Transform (CQT) feature to provide more flexible and
+accurate melody representations. This feature helps disambiguate and
+render music with multiple tracks or a broader range of pitch values.
+Furthermore, drawing inspiration from the JEN-1 composer [17], a
+progressive curriculum masking strategy is implemented to improve
+the learning of melody prompts, achieving a more effective balance
+between text and melody prompts during training. As a result, our
+model not only can perform prompt based music style transfer but
+also render and generate music content more precisely using melody
+prompts. Experimental results show that our model delivers com-
+petitive performance across various subjective and objective metrics,
+showcasing enhanced music editing abilities without considerable
+loss in text-to-music generation quality.
+Our main contributions are as follows:
+• To the best of our knowledge, we are the first to apply Con-
+trolNet [18] to the DiT model for music tasks, enabling precise,
+time-varying control over melody prompts.
+• We introduce top-k CQT, a flexible and effective representation
+of melody information based on constant-Q Transform features,
+which retains more detailed melody information and enhances
+the model’s ability to preserve melodies.
+• We propose a progressive curriculum masking strategy to stabi-
+lize training and improve music editing performance.
+II. B ACKGROUND
+A. Diffusion Model
+The diffusion model [19] is a type of generative approach based
+on probabilistic models, where the core idea is to decompose the
+generation process into a series of incremental random diffusion
+steps. By learning to reverse this process of adding random noise,
+the diffusion model gradually acquires the ability to generate target
+data from noise. Due to its high-quality generation and stable process,
+the diffusion model architecture has been adopted by various audio
+generation models, including Mo ˆusai [20], AudioLDM [21], [22],
+MusicLDM [12], [23], and MusicMagus [24].
+arXiv:2410.05151v2  [eess.AS]  16 Jan 2025
+
+
+===== PAGE 2 =====
+
+In the forward process, a stochastic process defined by a Markov
+chain increasingly adds noise to the clean data x0:
+q(x1:T |x0) =
+YT
+t=1
+q(xt|xt−1)
+q(xt|xt−1) = N (xt;
+p
+1 − βtxt−1, βtI),
+(1)
+where β1, · · · , βT are a sequence of predetermined noise schedule
+that define the noise level within the forward diffusion process.
+During training, diffusion models learn the reverse process with
+learnable parameters θ, which iteratively denoise a random sample
+xT ∼ N (0, I) to a data sample x0 ∼ p(x0):
+pθ(x0:T −1|xT ) =
+YT
+t=1
+pθ(xt−1|xt)
+pθ(xt−1|xt) = N (xt−1; µθ(xt, t), Σθ(xt, t)).
+(2)
+This denoising process can be trained by minimizing the mean
+squared error of the predicted noise ϵ ∼ N (0, I). Recently, the v-
+objective diffusion has been proposed [25], which estimates the model
+ˆvt = fθ(xt, t) by minimizing the following objective:
+Et∼[0,1],xt ∥fθ(αtx0 + σtϵ, t) − vσt ∥2
+2, (3)
+where vt = dxt/dt = αtϵ − σtx0 and t ∼ [0, 1] is noise schedule,
+αt = cos(0.5πt) and σt = sin(0.5πt).
+B. Diffusion Transformer (DiT)
+DiT [26] is a generative model that integrates the Diffusion model
+with Transformer architecture [27]. Unlike traditional diffusion mod-
+els that rely on the UNet architecture [28], DiT uses a Transformer
+encoder as the denoising network. By leveraging the self-attention
+mechanism of the Transformer, which excels at capturing long-range
+dependencies in data, it is particularly effective for modelling the
+complex structure of music, allowing it to generate coherent and
+consistent compositions. StableAudio 2 [16] applies DiT to audio
+generation, enabling high-quality, long-form music generation.
+III. P ROPOSED METHOD
+A. Diffusion Transformer with ControlNet
+In order to model long-form and variable-length music, we adopt
+StableAudio Open [29] as the backbone structure, which uses the DiT
+model. By combining DiT’s sequence modelling abilities and the low-
+latency advantages of an audio codec, this framework can generate
+high-quality stereo audio up to 47 seconds in length, guided by text
+prompts. In addition, thanks to StableAudio’s timing conditioning
+mechanism [15], the model can generate music with variable lengths,
+offering greater flexibility in music generation.
+Building on this foundation and inspired by Music ControlNet [5],
+we explore adding a control branch to diffusion models for time-
+varying melody control. Music ControlNet enables control over mu-
+sical attributes such as melody and dynamics by adapting ControlNet
+to the music domain. However, since Music ControlNet uses a UNet-
+structured diffusion model and ControlNet was designed for the UNet
+architecture, the original ControlNet is not directly compatible with
+the DiT structure we employed. For instance, DiT lacks the explicit
+symmetrical “encoder-decoder” structure present in UNet, making
+components like skip connections, which are utilized by the original
+ControlNet, unsuitable in this context.
+To address this issue, we draw inspiration from the ControlNet-
+Transformer structure used in Pixart- δ [30] and adapt it to the
+DiT architecture of StableAudio (as shown in Fig. 1). Specifically,
+ControlNet-Transformer replicates the first N Transformer blocks
+as the control branch. The output of the ith trainable copy block,
+after passing through an additional zero-initialized linear layer, is
+combined with the output of the ith frozen block and used as the
+input to the (i+1) th frozen block. This design maintains the original
+connection structure of the DiT model, enabling seamless integration
+of the ControlNet structure while preserving the core advantages of
+the Transformer structure.
+B. Top- k CQT Representation for Melody Information
+Finding a precise and flexible representation of melody information
+is critical to achieving time-varying control over music melody.
+Previous studies, such as Music ControlNet [5] and DITTO [11],
+[31], have used a one-hot 12-pitch-class chromagram as the melody
+control condition, which has two primary disadvantages. First, it
+only captures pitch changes within a single octave, meaning the
+model struggles to preserve melodies involving pitch changes across
+multiple octaves and cannot accurately infer absolute pitch infor-
+mation. Second, the argmax operation used in this method records
+only the most prominent pitch class for each frame, which limits its
+ability to extract complete melody information in music with multiple
+interwoven tracks. As a result, the generated melody may deviate
+significantly from the original, capturing only the overall melody
+envelope rather than the full harmonic details.
+To address the issues mentioned, we propose a more precise and
+flexible melody representation (Fig. 1) by extending CQT [32] to
+have the top- k most prominent pitch values. Since CQT’s centre
+frequencies are distributed exponentially, this representation aligns
+well with the frequency distribution of musical scales, making it
+highly effective for processing musical signals [33], [34]. For stereo
+audio input, we first compute the CQT with 128 bins for both left
+and right channels, then apply an argmax operation to retain the 4
+most prominent pitches per frame in each channel. This results in
+8 prominent pitches, interleaved and stacked, forming the melody
+prompt c ∈ R8×T fk, where T is the length of the audio in
+seconds and fk is the frame rate after CQT computation, with each
+pixel ci,j ∈ 1, 2, · · · , 128. As in Music ControlNet, we apply a
+biquadratic high-pass filter with a cut-off at Middle C (261.2 Hz)
+before computing the CQT. Since top- k CQT retains absolute pitch
+information and captures the melody details of multiple tracks, it
+significantly improves the precision of melody control. Meanwhile,
+top-k CQT maintains the flexibility of chroma representation, as it
+uses human-understandable pitch indices as melody prompts. This
+allows for not only extracting melody from audio but also converting
+music scores into melody control data or directly creating melodic
+representations as inputs for the model.
+To further enhance the extraction and representation of melody
+information, we use the melody prompt c as an index, transforming
+it from a representation of prominent pitch classes into a higher-
+dimensional latent melody prompt through pitch-specific trainable
+embeddings. Next, a series of 1D convolution layers are applied to
+downsample the melody information, aligning it with the input shape
+of ControlNet, thus enabling precise control over the melody in the
+generated music.
+C. Progressive Curriculum Masking Strategy
+While a precise melody prompt allows for greater control over
+the music’s melody, it also introduces challenges to the model’s
+creative flexibility. On one hand, overly precise melody prompts
+may incorporate additional musical elements, such as timbre, into
+the conditional information. In this case, the melody representation
+functions more like a compressed version of the target audio rather
+than a pure melody representation. On the other hand, since the
+melody prompt is temporally aligned with the target audio, the model
+
+
+===== PAGE 3 =====
+
+stereo music
+CQT (L/R)
+R0
+L1
+R0
+R1
+L2
+L0
+L1
+L3
+TOP4 (L/R)
+argmax
+interleave
+Melody Prompt
+Embedding
+L0
+R0
+L1
+R3 Conv 1D
+Latent
+Melody
+Prompt
+Creators
+compose
+L0R0L1R1L2R2L3R3
+(a) Processing pipeline for melody prompts.
+Transformer
+Block 1
+Transformer
+Block 2
+Transformer
+Block 12
+Transformer
+Block 13
+Transformer
+Block 24
+Transformer
+Block 1 (Copy)
+Transformer
+Block 2 (Copy)
+Transformer
+Block 12 (Copy)
+zero linear
+zero linear
+zero linear
+Text
+T5-base
+MLP
+Timestep
+Text&Timing
+Decoder
+Diffusion Transformer
+ControlNet
+Input
+Timing
+Number
+Conditioner
+Noise
+Cross
+Attention
+Condition
+Condition Latent
+Melody
+Prompt (b) Our model for music editing.
+Fig. 1. Overview of our Music Editing Model: (a) Melody prompt processing pipeline. The top- k CQT of the stereo audio is computed, and the prominent
+components are selected to form the melody prompt, which can also be manually composed. The latent melody prompt is then derived through further
+processing using an embedding layer and 1D convolutions. (b) The architecture of our model. The model primarily consists of DiT and ControlNet. Various
+conditioning inputs are supplied via two methods: prepending and cross-attention. During training, only the ControlNet and the structure responsible for
+extracting melody prompts are fine-tuned. In the figure,
+ indicates frozen components, while
+ indicates components that are finetuned.
+is more likely to learn the direct relationship between the melody
+prompt and the audio, rather than relying on the high-level text
+prompt. As a result of these two factors, the model may become
+adept at reconstructing the target audio from precise melody prompts,
+but less capable of generating music guided by both melody and text
+prompts.
+To address this issue, adjustments need to be made to the melody
+prompts during training. Inspired by JEN-1 Composer [17], we
+introduce a progressive curriculum masking strategy for the melody
+prompts to gradually enhance the model’s ability to utilize them
+for music modeling. The masking is applied in two directions:
+frame-wise and pitch-class-wise. Initially, all melody prompts are
+masked, allowing the model to learn music generation with empty
+melody prompts. As training progresses, the mask ratio in the frame
+direction is gradually reduced, enabling the model to progressively
+learn to incorporate melody prompts. It is important to note that the
+mask ratio does not decrease monotonically during training, as the
+probability of sampling smaller mask ratios increases over time, while
+a small probability of sampling larger mask ratios remains. After the
+initial full-mask phase, the top-1 melody prompt is retained, while
+the top-2, top-3, and top-4 melody prompts are randomly masked
+and shuffled. This curriculum masking strategy helps the model
+learn to use melody prompts more robustly, preventing overfitting to
+simple reconstruction tasks and avoiding the loss of its text-to-music
+generation ability. Ultimately, this approach strikes a balance between
+controlling generation with text and melody prompts, ensuring the
+model retains its text-to-music generation capabilities while learning
+music editing tasks.
+IV. E XPERIMENTAL SETUP
+A. Data
+Our training data are sourced from four public music datasets:
+MTG [35], FMA [36], MTT [37], and Wikimute [38]. Since our focus
+is on generating and editing instrumental music ( i.e., no singing),
+we use the PANNs [39] tagger to classify the tracks and filter out
+the portions with vocals. Furthermore, as these datasets primarily
+contain music tags rather than free-form descriptions, we leverage
+SALMONN-13B [40] to generate multiple captions for each filtered
+audio sample. After processing, we compile a dataset consisting of
+59,955 recordings, totaling 2,239.7 hours of high-quality text-music
+paired data. For evaluation, we select the no-singing subset from the
+Song Describer [41] dataset, which is the same benchmark used in
+the stable audio evaluations [15], [16], [29].
+B. Model
+For our pre-trained diffusion transformer model, we utilized the
+checkpoint from StableAudio Open [29], which includes both the
+DiT model and an autoencoder. ControlNet clones half of the pre-
+trained DiT, creating a control branch with a total of 12 Transformer
+blocks. All input audio is resampled and processed at 44.1 kHz in
+stereo format. Melody prompts are extracted using the CQT with a
+hop length of 512 and an fmin corresponding to a MIDI note number
+of 0 (8.18 Hz). Each octave contains 12 bins, resulting in a total of
+128 bins, which perfectly aligns with the 128 MIDI notes.
+During training, we utilize the v-objective [25] method, enabling
+the model to predict noise increments from noisy ground-truth data.
+
+
+===== PAGE 4 =====
+
+TABLE I
+THE OBJECTIVE RESULTS ON THE SONG DESCRIBER DATASET. FOR THE TEXT-TO-M USIC TASK , MUSIC IS GENERATED BASED ON A TEXT PROMPT . FOR
+THE MUSIC EDITING TASK , MUSIC IS GENERATED USING BOTH A TEXT PROMPT AND A MELODY PROMPT EXTRACTED FROM A GIVEN AUDIO SAMPLE .
+THE TOP -1 PERFORMANCE IS HIGHLIGHTED IN BOLD , AND THE TOP -2 PERFORMANCE IS UNDERLINED .
+Model Text-to-Music Music Editing
+FDopenl3 ↓ KLpasset ↓ CLAPscore ↑ Melody acc ↑ FDopenl3 ↓ KLpasset ↓ CLAPscore ↑
+MusicGen-stereo-melody 218.82 0.811 0.249 42.3% 199.35 0.432 0.348
+MusicGen-stereo-melody-large 201.53 0.707 0.279 44.7% 190.79 0.384 0.354
+Ours w/ cross attention 116.71 0.531 0.417 9.37% 115.10 0.587 0.412
+Ours w/o masking strategy — — — 54.9% 86.060 0.232 0.393
+Ours 158.53 0.623 0.375 56.6% 97.734 0.265 0.396
+The AdamW optimizer is used with a learning rate of 5e-5, along with
+an InverseLR scheduler set to a power of 0.5. The DiT parameters
+remain frozen, while only the ControlNet and the layers responsible
+for converting latent melody prompt are fine-tuned. Training is guided
+by mean squared error loss and continues until convergence, which
+takes approximately 3 days on 4 V100 GPUs, with a mini-batch size
+of 8 per GPU. For inference, we employ 250-step DPM-Solver++
+[42] sampling, using classifier-free guidance [43] with a scale of 7,
+applied exclusively to global text prompt control.
+C. Evaluation
+To assess time-varying melody controllability, adherence to global
+text control, and overall audio realism, we use a combination of
+subjective and objective metrics. For the objective metrics, melody
+accuracy evaluates the frame-wise alignment between pitch classes
+of the input melody control and those extracted from the generated
+audio, reflecting the model’s ability to preserve the melody during
+music editing. We use FD openl3 and KLpasst to evaluate the difference
+between the model-generated audio and the ground-truth reference.
+Additionally, CLAP score is used to assess the consistency between
+the generated audio and the provided text prompt. For the subjective
+metrics, we employ mean opinion scores (MOS) on a 5-point scale
+to evaluate both the alignment of the generated music with the text
+prompt and the overall audio quality. In total, 20 volunteers from
+different age groups participated in the evaluation. Among them,
+one-third have had prior experience learning musical instruments or
+received musical education.
+Our experiments evaluate two tasks: text-to-music generation and
+music editing. For the music editing task, we generate music based on
+two conditions: a music prompt extracted from the target audio and
+the corresponding text prompt. We select MusicGen-stereo-melody
+as baseline, as it is one of the most competitive open-source models
+for stereo music generation and editing. Additionally, we conduct an
+ablation study to explore various architectures for handling music
+prompts and different masking strategies. Specifically, we examine
+alternative ControlNet structures by replacing information injection
+via addition with cross-attention mechanisms.
+V. E XPERIMENTAL RESULTS
+A. Objective Results
+The objective results in Table I demonstrate that our model success-
+fully balances text-to-music generation and music editing, delivering
+strong performance in both tasks. Although our model degrades
+text-to-music performance to improve music editing performance
+compared to StableAudio Open, it still significantly outperforms
+MusicGen. In the music editing task, our model excels across all
+four evaluation metrics, highlighting its proficiency in music editing
+while retaining a solid level of text-to-music generation capability.
+TABLE II
+THE SUBJECTIVE RESULTS ON THE SONG DESCRIBER DATASET . TF AND
+OVL REPRESENT TEXT FIT AND OVERALL QUALITY , RESPECTIVELY .
+Model Text-to-Music Music Editing
+TF OVL TF OVL
+MusicGen-stereo-melody 2.8 2.5 3.2 3.3
+MusicGen-stereo-melody-large 3.3 3.6 3.5 3.5
+Ours 3.4 3.6 3.7 3.8
+B. Subjective Results
+Table II presents the average MOS scores for text-music consis-
+tency and audio quality. The subjective results clearly show that
+our model outperforms MusicGEN in both tasks, with a particularly
+notable advantage in the music editing task.
+C. Ablation Study
+The results of the ablation study indicate that although inject-
+ing prompts via cross-attention aligns better with the Transformer
+structure and improves the quality of the generated music, it nearly
+eliminates the model’s music editing ability and struggles to balance
+the two types of prompts, essentially functioning as a pure text-to-
+music model, as reflected by the lower melody accuracy.
+Regarding the masking strategy, without it, the model cannot
+effectively maintain both text-to-music generation and music editing
+capabilities. Without the masking strategy, the model is consistently
+trained on a complete melody prompt, which hinders its ability to
+perform text-to-music tasks that rely solely on a text prompt without
+a melody prompt. Although the model performs reasonably well on
+music editing metrics, this does not imply that it possesses strong
+music editing capabilities. As previously mentioned, during training,
+without the masking strategy, the model behaves more like it is
+reconstructing the target audio based on the melody prompt, rather
+than performing true music editing.
+Therefore, even though these two models in the ablation study
+exhibit top performance on many metrics, they fail to properly
+balance the control effects of the text prompt and the melody prompt.
+VI. C ONCLUSION
+In this paper, we propose a novel music generation and editing
+approach designed to support long-form and variable-length music as
+well as both text and melody prompts. To achieve this, we integrated
+ControlNet into the DiT structure and introduced a novel top- k CQT
+representation as the melody prompt, providing more precise and fine-
+grained melody control. Both subjective and objective results show
+that our model, while maintaining strong text-to-music generation
+abilities, excels in music editing and achieves a more balanced control
+between text and melody prompts.
+
+
+===== PAGE 5 =====
+
+REFERENCES
+[1] A. Agostinelli, T. I. Denk, Z. Borsos, J. Engel, M. Verzetti, A. Caillon,
+Q. Huang, A. Jansen, A. Roberts, M. Tagliasacchi et al. , “Musiclm:
+Generating music from text,” arXiv preprint arXiv:2301.11325 , 2023.
+[2] J. Copet, F. Kreuk, I. Gat, T. Remez, D. Kant, G. Synnaeve, Y . Adi,
+and A. D ´efossez, “Simple and controllable music generation,” in Proc.
+NeurIPS, New Orleans, 2023.
+[3] O. Tal, A. Ziv, I. Gat, F. Kreuk, and Y . Adi, “Joint audio and symbolic
+conditioning for temporally controlled text-to-music generation,” arXiv
+preprint arXiv:2406.10970, 2024.
+[4] P. P. Li, B. Chen, Y . Yao, Y . Wang, A. Wang, and A. Wang, “JEN-1:
+Text-guided universal music generation with omnidirectional diffusion
+models,” in Proc. CAI, Singapore, 2024.
+[5] S.-L. Wu, C. Donahue, S. Watanabe, and N. J. Bryan, “Music Control-
+Net: Multiple time-varying controls for music generation,” IEEE/ACM
+Transactions on Audio, Speech, and Language Processing , vol. 32, pp.
+2692–2703, 2024.
+[6] J. Nistal, M. Pasini, C. Aouameur, M. Grachten, and S. Lattner, “Diff-
+a-riff: Musical accompaniment co-creation via latent diffusion models,”
+in Proc. ISMIR, San Francisco, 2024.
+[7] J. D. Parker, J. Spijkervet, K. Kosta, F. Yesiler, B. Kuznetsov, J.-C.
+Wang, M. Avent, J. Chen, and D. Le, “Stemgen: A music generation
+model that listens,” in Proc. ICASSP, Seoul, 2024.
+[8] G. Mariani, I. Tallini, E. Postolache, M. Mancusi, L. Cosmo, and
+E. Rodol `a, “Multi-source diffusion models for simultaneous music
+generation and separation,” in Proc. ICLR, Vienna, 2024.
+[9] C. Donahue, A. Caillon, A. Roberts, E. Manilow, P. Esling,
+A. Agostinelli, M. Verzetti, I. Simon, O. Pietquin, N. Zeghidour et al. ,
+“Singsong: Generating musical accompaniments from singing,” arXiv
+preprint arXiv:2301.12662, 2023.
+[10] L. Lin, G. Xia, J. Jiang, and Y . Zhang, “Content-based controls for music
+large language modeling,” arXiv preprint arXiv:2310.17162 , 2023.
+[11] Z. Novack, J. McAuley, T. Berg-Kirkpatrick, and N. J. Bryan, “DITTO:
+Diffusion inference-time T-optimization for music generation,” in Proc.
+ICML, Vienna, 2024.
+[12] K. Chen, Y . Wu, H. Liu, M. Nezhurina, T. Berg-Kirkpatrick, and
+S. Dubnov, “MusicLDM: Enhancing novelty in text-to-music generation
+using beat-synchronous mixup strategies,” inProc. ICASSP, Seoul, 2024.
+[13] S. Li, Y . Zhang, F. Tang, C. Ma, W. Dong, and C. Xu, “Music style
+transfer with time-varying inversion of diffusion models,” in Proc. AAAI,
+Vancouver, 2024.
+[14] J. Xue, Y . Deng, Y . Gao, and Y . Li, “Auffusion: Leveraging the power of
+diffusion and large language models for text-to-audio generation,” arXiv
+preprint arXiv:2401.01044, 2024.
+[15] Z. Evans, C. Carr, J. Taylor, S. H. Hawley, and J. Pons, “Fast timing-
+conditioned latent audio diffusion,” in Proc. ICML, Vienna, 2024.
+[16] Z. Evans, J. D. Parker, C. Carr, Z. Zukowski, J. Taylor, and J. Pons,
+“Long-form music generation with latent diffusion,” arXiv preprint
+arXiv:2404.10301, 2024.
+[17] Y . Yao, P. Li, B. Chen, and A. Wang, “JEN-1 composer: A unified
+framework for high-fidelity multi-track music generation,”arXiv preprint
+arXiv:2310.19180, 2023.
+[18] L. Zhang, A. Rao, and M. Agrawala, “Adding conditional control to
+text-to-image diffusion models,” in Proc. ICCV, Paris, 2023.
+[19] J. Ho, A. Jain, and P. Abbeel, “Denoising diffusion probabilistic models,”
+in Proc. NeurIPS, San Diego, 2020.
+[20] F. Schneider, O. Kamal, Z. Jin, and B. Sch ¨olkopf, “Mo ˆusai: Efficient
+text-to-music diffusion models,” in Proc. ACL, Bangkok, 2024.
+[21] H. Liu, Z. Chen, Y . Yuan, X. Mei, X. Liu, D. Mandic, W. Wang,
+and M. D. Plumbley, “AudioLDM: Text-to-audio generation with latent
+diffusion models,” in Proc. ICML, Hawaii, 2023.
+[22] H. Liu, Y . Yuan, X. Liu, X. Mei, Q. Kong, Q. Tian, Y . Wang, W. Wang,
+Y . Wang, and M. D. Plumbley, “AudioLDM 2: Learning holistic audio
+generation with self-supervised pretraining,” IEEE/ACM Transactions on
+Audio, Speech, and Language Processing , vol. 32, pp. 2871–2883, 2024.
+[23] T. Karchkhadze, M. R. Izadi, K. Chen, G. Assayag, and S. Dubnov,
+“Multi-track MusicLDM: Towards versatile music generation with latent
+diffusion model,” arXiv preprint arXiv:2409.02845 , 2024.
+[24] Y . Zhang, Y . Ikemiya, G. Xia, N. Murata, M. Mart ´ınez, W.-H. Liao,
+Y . Mitsufuji, and S. Dixon, “MusicMagus: Zero-shot text-to-music
+editing via diffusion models,” in Proc. IJCAI, Jeju, 2024.
+[25] J. Ho, A. Jain, and P. Abbeel, “Progressive distillation for fast sampling
+of diffusion models,” in Proc. ICLR, 2022.
+[26] W. Peebles and S. Xie, “Scalable diffusion models with transformers,”
+in Proc. ICCV, Paris, 2023.
+[27] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N.Gomez,
+and Łukasz Kaiser, “Attention is all you need,” in Proc. NeurIPS, Long
+Beach, 2017.
+[28] R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer, “High-
+resolution image synthesis with latent diffusion models,” in Proc. CVPR,
+New Orleans, 2022.
+[29] Z. Evans, J. D. Parker, C. Carr, Z. Zukowski, J. Taylor, and J. Pons,
+“Stable audio open,” arXiv preprint arXiv:2407.14358 , 2024.
+[30] J. Chen, Y . Wu, S. Luo, E. Xie, S. Paul, P. Luo, H. Zhao, and Z. Li,
+“Pixart-δ: Fast and controllable image generation with latent consistency
+models,” arXiv preprint arXiv:2401.05252 , 2024.
+[31] Z. Novack, J. McAuley, T. Berg-Kirkpatrick, and N. J. Bryan, “DITTO-2:
+Distilled diffusion inference-time t-optimization for music generation,”
+in Proc. ISMIR, San Francisco, 2024.
+[32] J. C. Brown, “Calculation of a constant Q spectral transform,” The
+Journal of the Acoustical Society of America , vol. 89, pp. 425–434,
+1991.
+[33] R. M. Bittner, B. McFee, J. Salamon, P. Li, and J. P. Bello, “Deep
+salience representations for f0 estimation in polyphonic music.” in Proc.
+ISMIR, Suzhou, 2017.
+[34] N. Demerl ´e, P. Esling, G. Doras, and D. Genova, “Combining audio
+control and style transfer using latent diffusion,” in Proc. ISMIR , San
+Francisco, 2024.
+[35] D. Bogdanov, M. Won, P. Tovstogan, A. Porter, and X. Serra, “The
+MTG-Jamendo dataset for automatic music tagging,” in Proc. ICML ,
+Long Beach, 2019.
+[36] M. Defferrard, K. Benzi, P. Vandergheynst, and X. Bresson, “FMA: A
+dataset for music analysis,” in Proc. ISMIR, Suzhou, 2017.
+[37] E. Law, K. West, M. I. Mandel, M. Bay, and J. S. Downie, “Evaluation
+of algorithms using games: The case of music tagging.” in Proc. ISMIR,
+Kobe, 2009.
+[38] B. Weck, H. Kirchhoff, P. Grosche, and X. Serra, “WikiMuTe: A web-
+sourced dataset of semantic descriptions for music audio,” in Proc.
+MMM, Amsterdam, 2024.
+[39] Q. Kong, Y . Cao, T. Iqbal, Y . Wang, W. Wang, and M. D. Plumbley,
+“PANNs: Large-scale pretrained audio neural networks for audio pattern
+recognition,” IEEE/ACM Transactions on Audio, Speech, and Language
+Processing, vol. 28, pp. 2880–2894, 2020.
+[40] C. Tang, W. Yu, G. Sun, X. Chen, T. Tan, W. Li, L. Lu, Z. MA,
+and C. Zhang, “SALMONN: Towards generic hearing abilities for large
+language models,” in Proc. ICML, Vienna, 2024.
+[41] I. Manco, B. Weck, S. Doh, M. Won, Y . Zhang, D. Bogdanov, Y . Wu,
+K. Chen, P. Tovstogan, E. Benetos, E. Quinton, G. Fazekas, and J. Nam,
+“The Song Describer dataset: A corpus of audio captions for music-and-
+language evaluation,” in Proc. NeurIPS, New Orleans, 2023.
+[42] C. Lu, Y . Zhou, F. Bao, J. Chen, C. Li, and J. Zhu, “DPM-Solver++:
+Fast solver for guided sampling of diffusion probabilistic models,” arXiv
+preprint arXiv:2211.01095, 2022.
+[43] J. Ho and T. Salimans, “Classifier-free diffusion guidance,” in Proc.
+NeurIPS, 2021.
