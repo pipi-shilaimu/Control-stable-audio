@@ -3,6 +3,7 @@ import typing as tp
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class ControlNetContinuousTransformer(nn.Module):
@@ -109,6 +110,30 @@ class ControlNetContinuousTransformer(nn.Module):
         model_dtype = next(self.parameters()).dtype
         x = x.to(model_dtype)
         control_input = control_input.to(model_dtype)
+
+        # DiT can expand batch for CFG internally (e.g., [B,...] -> [2B,...]).
+        # When that happens, control_input needs to match x batch size.
+        if control_input.shape[0] != x.shape[0]:
+            if x.shape[0] % control_input.shape[0] != 0:
+                raise ValueError(
+                    f"Batch mismatch: x batch={x.shape[0]}, control_input batch={control_input.shape[0]}"
+                )
+            repeat_factor = x.shape[0] // control_input.shape[0]
+            control_input = control_input.repeat(repeat_factor, 1, 1)
+
+        # Align sequence length if caller provides a different control length.
+        if control_input.shape[1] != x.shape[1]:
+            control_input = F.interpolate(
+                control_input.transpose(1, 2),
+                size=x.shape[1],
+                mode="nearest",
+            ).transpose(1, 2)
+
+        expected_dim_in = self.base.project_in.in_features
+        if control_input.shape[2] != expected_dim_in:
+            raise ValueError(
+                f"control_input last dim must be {expected_dim_in}, got {control_input.shape[2]}"
+            )
 
         # 与 base 返回结构保持一致：仅在需要时收集中间层隐藏态。
         info = {"hidden_states": []} if return_info else None
