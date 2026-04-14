@@ -66,6 +66,96 @@
     - `conditioning = diffusion.conditioner(metadata, device)`
     - `diffusion(noised_latents, t, cond=conditioning, ...)`
 
+#### 任务 1 补充：接口设计规格（V1，可直接实现）
+
+**A. 训练/推理对外调用保持不变（兼容现有 wrapper）**
+
+- 外部调用仍使用：
+  - `conditioning = diffusion.conditioner(metadata, device)`
+  - `diffusion(noised_latents, t, cond=conditioning, cfg_dropout_prob=..., **extra_args)`
+- 不要求调用方显式传 `control_input`（由 `control_dit.py` 从 `cond` 中自动提取并转换）。
+- 可选新增运行时参数：
+  - `control_scale: float = 1.0`（训练默认 `1.0`，推理可调）
+
+**B. `cond` 字段契约（新增 `melody_control`）**
+
+- 约定新增 id：`melody_control`。
+- `cond["melody_control"]` 的返回结构与 `stable_audio_tools` 一致，仍为二元组语义：`[tensor, mask]`。
+- `tensor` 的标准输入形状（推荐）：
+  - `[B, C_melody, L_melody]`（channels-first，便于与 `input_concat`/音频特征习惯对齐）
+- `mask` 在 V1 可为 `None`（后续可扩展为帧级掩码）。
+
+**C. 形状转换规则（由 `control_dit.py` 统一负责）**
+
+- 从 `cond["melody_control"][0]` 读取 `melody_tensor` 后，执行：
+  1. 时长对齐：`L_melody -> L_x`（其中 `L_x = x.shape[-1]`），默认最近邻插值；
+  2. 维度变换：`[B, C_melody, L_x] -> [B, L_x, C_melody]`；
+  3. 可学习投影：`Linear(C_melody, dim_in)`；
+  4. 得到 `control_input: [B, L_x, dim_in]`，传入 `ControlNetContinuousTransformer`。
+- `ControlNetContinuousTransformer` 不再负责外部特征形状推断；它只消费最终标准形状：
+  - `control_input: [B, seq, dim_in]`
+
+**D. 模块职责边界（避免后续职责混乱）**
+
+- `stable_audio_control/models/control_transformer.py`
+  - 只做 Transformer 层内 ControlNet 注入逻辑（control branch + zero-linear 注入）
+  - 不做 metadata 解析，不做 CQT，不做 `cond` 路由
+- `stable_audio_control/models/control_dit.py`
+  - 负责把 `cond` 映射到模型可消费的参数（尤其是 `melody_control -> control_input`）
+  - 负责 CFG 情况下 `control_input` 的 batch 对齐
+- `stable_audio_control/melody/*`
+  - 负责旋律特征生成与训练时遮罩策略
+
+**E. CFG 对齐规则（必须实现）**
+
+- 当 DiT 进入 batch CFG 路径时，`x/t` 会扩为 `2B`（条件分支 + 无条件分支）。
+- `control_input` 必须同步扩为 `2B`，否则会 batch 维不匹配。
+- V1 默认策略：
+  - `control_input_cfg = torch.cat([control_input, control_input], dim=0)`
+  - 即无条件分支也复制同一 control（先保证稳定与兼容）
+- V2 可扩展策略：
+  - 支持 `negative_melody_control` 或对无条件分支置零控制
+
+**F. 可训练参数范围（V1）**
+
+- 冻结：
+  - 预训练 StableAudio Open 的 base DiT、原始 `ContinuousTransformer` 主干、pretransform、原有 text/timing conditioner
+- 训练：
+  - `control_layers`
+  - `zero_linears`
+  - melody feature projector（`C_melody -> dim_in`）
+  - 后续加入的 melody embedding + Conv1D 下采样器
+
+**G. `control_dit.py` 建议签名（V1）**
+
+```python
+class ControlConditionedDiffusionWrapper(nn.Module):
+    def __init__(
+        self,
+        base_wrapper,                      # get_pretrained_model 返回对象
+        control_id: str = "melody_control",
+        default_control_scale: float = 1.0,
+        melody_channels: int = 8,
+        control_interp_mode: str = "nearest",
+    ): ...
+
+    def forward(
+        self,
+        x: torch.Tensor,                   # [B, C_latent, L]
+        t: torch.Tensor,                   # [B]
+        cond: dict,                        # conditioner 输出
+        cfg_dropout_prob: float = 0.0,
+        control_scale: float | None = None,
+        **kwargs,
+    ) -> torch.Tensor: ...
+```
+
+**H. 任务 1 的最小验收标准（进入任务 2 前必须满足）**
+
+- Smoke-1：zero-init adapter 下，`control_scale=0` 与 `control_scale>0` 输出差异为 0（或数值近似 0）。
+- Smoke-2：轻微扰动任意一个 `zero_linear` 后，输出差异变为非零。
+- Smoke-3：通过 `DiffusionCondTrainingWrapper` 跑 1 个 batch 时不发生 shape/batch mismatch。
+
 ---
 
 ### 任务 2：实现 top-k CQT 提取（立体声，每声道 top-4）
