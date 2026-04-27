@@ -34,8 +34,8 @@ Create a small local package for the new functionality (avoid editing `.venv/sit
 - Create: `stable_audio_control/models/control_transformer.py` (ControlNet injection for `ContinuousTransformer`)
 - Create: `stable_audio_control/models/control_dit.py` (ControlNet-DiT wrapper compatible with `stable_audio_tools` training/inference)
 - Create: `stable_audio_control/data/custom_metadata.py` (dataset metadata hook to compute melody control from the target audio)
-- Create: `scripts/train_controlnet_dit.py` (training entrypoint)
-- Create: `scripts/generate_melody_edit.py` (inference entrypoint)
+- Create: `stable_audio_control/scripts/train_controlnet_dit.py` (training entrypoint)
+- Create: `stable_audio_control/scripts/generate_melody_edit.py` (inference entrypoint)
 
 Optional (recommended):
 - Create: `tests/test_cqt_topk.py`
@@ -223,7 +223,7 @@ Optional (recommended):
 ### Task 8: Training entrypoint (fine-tune ControlNet + melody conditioner)
 
 **Files:**
-- Create: `scripts/train_controlnet_dit.py`
+- Create: `stable_audio_control/scripts/train_controlnet_dit.py`
 - Create: `configs/train_controlnet_dit.json` (recommended)
 
 - [ ] **Step 1: Build the model**
@@ -248,7 +248,7 @@ Optional (recommended):
 
 Run example:
 ```powershell
-.\.venv\Scripts\python.exe scripts/train_controlnet_dit.py --train-config configs/train_controlnet_dit.json --dataset-config configs/dataset_audio_dir_with_melody.json
+.\.venv\Scripts\python.exe stable_audio_control/scripts/train_controlnet_dit.py --train-config configs/train_controlnet_dit.json --dataset-config configs/dataset_audio_dir_with_melody.json
 ```
 
 ---
@@ -256,7 +256,7 @@ Run example:
 ### Task 9: Inference entrypoint (melody + text editing)
 
 **Files:**
-- Create: `scripts/generate_melody_edit.py`
+- Create: `stable_audio_control/scripts/generate_melody_edit.py`
 - Modify (optional): `main.py` or `demo.py`
 
 - [ ] **Step 1: CLI arguments**
@@ -301,4 +301,5 @@ Run:
 - **Compute cost:** computing CQT on-the-fly for every batch can be expensive; consider caching (pre-encode) once the pipeline works.
 - **Length alignment:** CQT frame rate vs latent sequence length must be handled carefully (interpolation or conv downsampling).
 - **CFG interactions:** keep melody conditioning independent of text CFG (match paper).
+
 

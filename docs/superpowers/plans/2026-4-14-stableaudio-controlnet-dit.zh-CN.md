@@ -34,8 +34,8 @@
 - 新建：`stable_audio_control/models/control_transformer.py`（为 `ContinuousTransformer` 注入 ControlNet）
 - 新建：`stable_audio_control/models/control_dit.py`（ControlNet-DiT wrapper，兼容 `stable_audio_tools` 训练 / 推理）
 - 新建：`stable_audio_control/data/custom_metadata.py`（dataset metadata hook：从目标音频计算旋律控制）
-- 新建：`scripts/train_controlnet_dit.py`（训练入口）
-- 新建：`scripts/generate_melody_edit.py`（推理入口）
+- 新建：`stable_audio_control/scripts/train_controlnet_dit.py`（训练入口）
+- 新建：`stable_audio_control/scripts/generate_melody_edit.py`（推理入口）
 
 可选（推荐）：
 - 新建：`tests/test_cqt_topk.py`
@@ -313,7 +313,7 @@ class ControlConditionedDiffusionWrapper(nn.Module):
 ### 任务 8：训练入口（只微调 ControlNet + melody conditioner）
 
 **文件：**
-- 新建：`scripts/train_controlnet_dit.py`
+- 新建：`stable_audio_control/scripts/train_controlnet_dit.py`
 - 新建：`configs/train_controlnet_dit.json`（推荐）
 
 - [ ] **步骤 1：构建模型**
@@ -338,7 +338,7 @@ class ControlConditionedDiffusionWrapper(nn.Module):
 
 运行示例：
 ```powershell
-.\.venv\Scripts\python.exe scripts/train_controlnet_dit.py --train-config configs/train_controlnet_dit.json --dataset-config configs/dataset_audio_dir_with_melody.json
+.\.venv\Scripts\python.exe stable_audio_control/scripts/train_controlnet_dit.py --train-config configs/train_controlnet_dit.json --dataset-config configs/dataset_audio_dir_with_melody.json
 ```
 
 ---
@@ -346,7 +346,7 @@ class ControlConditionedDiffusionWrapper(nn.Module):
 ### 任务 9：推理入口（旋律 + 文本编辑）
 
 **文件：**
-- 新建：`scripts/generate_melody_edit.py`
+- 新建：`stable_audio_control/scripts/generate_melody_edit.py`
 - 修改（可选）：`main.py` 或 `demo.py`
 
 - [ ] **步骤 1：CLI 参数**
@@ -391,4 +391,5 @@ class ControlConditionedDiffusionWrapper(nn.Module):
 - **计算成本：** 每个 batch 在线计算 CQT 可能很贵；流程跑通后建议考虑缓存（pre-encode）来降成本。
 - **长度对齐：** CQT 的帧率与 latent 序列长度的对齐需要小心处理（插值或 Conv 下采样）。
 - **CFG 交互：** 旋律 conditioning 保持独立于文本 CFG（对齐论文做法）。
+
 

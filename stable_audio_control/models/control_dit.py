@@ -126,6 +126,8 @@ class ControlConditionedDiffusionWrapper(nn.Module):
             control_blc = control_tensor
         else:
             control_bcl = control_tensor
+            if not torch.is_floating_point(control_bcl):
+                control_bcl = control_bcl.to(dtype=dtype)
             if control_bcl.shape[-1] != target_len:
                 control_bcl = F.interpolate(
                     control_bcl,

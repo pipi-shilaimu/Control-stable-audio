@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python \"c:/PROJECT/StableAudio/scripts/train_control_smoke.py\")"
+    ]
+  }
+}
