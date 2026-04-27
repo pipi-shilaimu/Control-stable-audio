@@ -20,8 +20,8 @@
    - `stable_audio_control/models/control_transformer.py`
    - `stable_audio_control/models/control_dit.py`
 6. 现有 smoke 脚本（复用）  
-   - `scripts/smoke_control_injection_stableaudio_open-1.py`
-   - `scripts/smoke_control_dit_wrapper.py`
+   - `stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py`
+   - `stable_audio_control/scripts/smoke_control_dit_wrapper.py`
 
 ---
 
@@ -47,15 +47,15 @@
 ### Step 1：先跑已有两个 smoke（确认当前基线）
 
 - 运行：
-  - `.\\.venv\\Scripts\\python.exe scripts/smoke_control_injection_stableaudio_open-1.py`
-  - `.\\.venv\\Scripts\\python.exe scripts/smoke_control_dit_wrapper.py`
+  - `.\\.venv\\Scripts\\python.exe stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py`
+  - `.\\.venv\\Scripts\\python.exe stable_audio_control/scripts/smoke_control_dit_wrapper.py`
 - 预期：
   - zero-init 下 `diff` 接近 0
   - 微扰 `zero_linear` 后 `diff` > 0
 
 ### Step 2：补一个“最小训练烟测脚本”
 
-- 新建脚本：`scripts/train_control_smoke.py`
+- 新建脚本：`stable_audio_control/scripts/train_control_smoke.py`
 - 脚本职责（最小可行）：
   1. 加载 `stabilityai/stable-audio-open-1.0`
   2. 用 `build_control_wrapper(...)` 包装模型
@@ -101,5 +101,4 @@
 
 ## 建议下一对话开场提示词（给执行 Agent）
 
-> 请按 `agent.md` 执行“开始训练前最小验证任务”，先读文档再实施。目标是完成 `scripts/train_control_smoke.py` 并跑通最小验证集，最后给出 Go/No-Go 结论和证据。
-
+> 请按 `agent.md` 执行“开始训练前最小验证任务”，先读文档再实施。目标是完成 `stable_audio_control/scripts/train_control_smoke.py` 并跑通最小验证集，最后给出 Go/No-Go 结论和证据。

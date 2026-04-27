@@ -1,6 +1,6 @@
 # ControlNetContinuousTransformer 使用文档（StableAudio Open）
 
-本文档针对 `stable_audio_control/models/control_transformer.py` 中的 `ControlNetContinuousTransformer`，并以 `scripts/smoke_control_injection_stableaudio_open.py` 为使用参考，补充其在 `stable_audio_tools` 调用链中的实际接入方式。
+本文档针对 `stable_audio_control/models/control_transformer.py` 中的 `ControlNetContinuousTransformer`，并以 `stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py` 为使用参考，补充其在 `stable_audio_tools` 调用链中的实际接入方式。
 
 ## 1. 这个类解决什么问题
 
@@ -109,11 +109,11 @@ forward(
 5. 当你已替换 `self.transformer` 为 `ControlNetContinuousTransformer` 时，
    - `control_input`、`control_scale` 这两个自定义参数就会进入 `ControlNetContinuousTransformer.forward(...)`。
 
-这也是 `smoke_control_injection_stableaudio_open.py` 能直接在 `model(...)` 里传 `control_input/control_scale` 的原因。
+这也是 `stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py` 能直接在 `model(...)` 里传 `control_input/control_scale` 的原因。
 
 ## 4. 参考脚本接入步骤（最小可运行）
 
-参考：`scripts/smoke_control_injection_stableaudio_open.py`
+参考：`stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py`
 
 ### 步骤 1：加载预训练 StableAudio Open
 

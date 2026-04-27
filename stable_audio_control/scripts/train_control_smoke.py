@@ -8,8 +8,9 @@ from torch import nn
 from torch.nn.parameter import UninitializedParameter
 
 # Allow script execution without installing local package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from stable_audio_control.melody.cqt_topk import CQTTopKConfig, CQTTopKExtractor  # noqa: E402
 from stable_audio_control.models import (  # noqa: E402
     ControlConditionedDiffusionWrapper,
     ControlNetContinuousTransformer,
@@ -21,32 +22,31 @@ from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper  
 
 
 class MelodyControlAugmenter(nn.Module):
-    """Inject synthetic `melody_control` into conditioner output for smoke training."""
+    """Inject extracted `melody_control` into conditioner output for smoke training."""
 
     def __init__(
         self,
         base_conditioner: nn.Module,
         control_id: str,
-        melody_channels: int,
-        control_length: int,
+        extractor: CQTTopKExtractor,
         fallback_dtype: torch.dtype,
     ) -> None:
         super().__init__()
         self.base_conditioner = base_conditioner
         self.control_id = control_id
-        self.melody_channels = melody_channels
-        self.control_length = control_length
+        self.extractor = extractor
         self.fallback_dtype = fallback_dtype
 
     def forward(self, metadata: List[Dict[str, Any]], device: torch.device) -> Dict[str, Any]:
         conditioning = self.base_conditioner(metadata, device)
-        batch_size = len(metadata)
+        if not metadata:
+            conditioning[self.control_id] = [torch.zeros((0, 8, 1), device=device, dtype=torch.long), None]
+            return conditioning
 
-        melody_control = torch.randn(
-            (batch_size, self.melody_channels, self.control_length),
-            device=device,
-            dtype=self.fallback_dtype,
-        )
+        audio_length = int(metadata[0]["padding_mask"][0].shape[-1])
+        batch_size = len(metadata)
+        synthetic_audio = torch.randn((batch_size, 2, audio_length), device=device, dtype=self.fallback_dtype)
+        melody_control = self.extractor.extract(synthetic_audio).to(device=device)
         conditioning[self.control_id] = [melody_control, None]
         return conditioning
 
@@ -178,7 +178,6 @@ def main() -> None:
     batch_size = 1
     audio_length = 65_536 if device.type == "cuda" else 32_768
     melody_channels = 8
-    control_length = 32
 
     base_model, model_config = get_pretrained_model(model_name)
     base_model = cast(ConditionedDiffusionModelWrapper, base_model)
@@ -193,11 +192,13 @@ def main() -> None:
     control_model = cast(ControlConditionedDiffusionWrapper, control_model)
 
     model_dtype = next(control_model.parameters()).dtype
+    extractor = CQTTopKExtractor(
+        CQTTopKConfig(sample_rate=int(model_config["sample_rate"]), top_k=melody_channels // 2, backend="auto")
+    )
     control_model.base_wrapper.conditioner = MelodyControlAugmenter(
-        base_conditioner=control_model.base_wrapper.conditioner,
+        base_conditioner=cast(nn.Module, control_model.base_wrapper.conditioner),
         control_id="melody_control",
-        melody_channels=melody_channels,
-        control_length=control_length,
+        extractor=extractor,
         fallback_dtype=model_dtype,
     )
 

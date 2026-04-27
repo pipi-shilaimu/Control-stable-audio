@@ -6,7 +6,7 @@ from typing import cast
 import torch
 
 # 允许直接以脚本方式运行，无需先安装本地包。
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stable_audio_control.models.control_transformer import ControlNetContinuousTransformer
 from stable_audio_tools.models.diffusion import ConditionedDiffusionModelWrapper

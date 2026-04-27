@@ -14,7 +14,7 @@
 
 **Files:**
 - Modify: `agent.md` requirements only (no code changes)
-- Test: `scripts/smoke_control_injection_stableaudio_open-1.py`, `scripts/smoke_control_dit_wrapper.py`
+- Test: `stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py`, `stable_audio_control/scripts/smoke_control_dit_wrapper.py`
 
 - [x] **Step 1: Run control injection smoke script**
 - [x] **Step 2: Confirm zero-init diff ~= 0**
@@ -24,8 +24,8 @@
 ### Task 2: Implement Minimal Training Smoke Script
 
 **Files:**
-- Create: `scripts/train_control_smoke.py`
-- Test: `scripts/train_control_smoke.py`
+- Create: `stable_audio_control/scripts/train_control_smoke.py`
+- Test: `stable_audio_control/scripts/train_control_smoke.py`
 
 - [x] **Step 1: Build script skeleton and imports**
 - [x] **Step 2: Add model loading + control wrapper construction**
@@ -38,8 +38,9 @@
 
 **Files:**
 - Create: `docs/Control-net-notes/train_control_smoke_report_2026-04-21.zh-CN.md`
-- Test: `scripts/train_control_smoke.py`
+- Test: `stable_audio_control/scripts/train_control_smoke.py`
 
-- [x] **Step 1: Run `scripts/train_control_smoke.py`**
+- [x] **Step 1: Run `stable_audio_control/scripts/train_control_smoke.py`**
 - [x] **Step 2: Capture key outputs and pass/fail evidence**
 - [x] **Step 3: Write Go/No-Go report with unresolved risks (if any)**
+

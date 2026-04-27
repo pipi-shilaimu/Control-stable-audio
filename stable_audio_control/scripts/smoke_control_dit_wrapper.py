@@ -6,7 +6,7 @@ from typing import cast
 import torch
 
 # Allow running as a script without installing the local package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stable_audio_control.models import (
     ControlConditionedDiffusionWrapper,
@@ -125,4 +125,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

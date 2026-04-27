@@ -11,14 +11,14 @@
 ### Step 1：既有 smoke 基线
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/smoke_control_injection_stableaudio_open-1.py
-.\.venv\Scripts\python.exe scripts/smoke_control_dit_wrapper.py
+.\.venv\Scripts\python.exe stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py
+.\.venv\Scripts\python.exe stable_audio_control/scripts/smoke_control_dit_wrapper.py
 ```
 
 ### Step 2：最小训练烟测（新增）
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/train_control_smoke.py
+.\.venv\Scripts\python.exe stable_audio_control/scripts/train_control_smoke.py
 ```
 
 ## 2. 关键输出摘录
@@ -62,7 +62,7 @@
 
 ## 4. 本次新增脚本说明
 
-- 新增脚本：`scripts/train_control_smoke.py`
+- 新增脚本：`stable_audio_control/scripts/train_control_smoke.py`
 - 功能覆盖：
   - 加载 `stabilityai/stable-audio-open-1.0`
   - 通过 `build_control_wrapper(...)` 构建控制包装器

@@ -145,13 +145,13 @@ out = model(
 
 推荐先跑：
 
-- `scripts/smoke_control_injection.py`  
+- `stable_audio_control/scripts/smoke_control_injection.py`  
   纯离线 toy transformer，验证注入机制本身。
 
-- `scripts/smoke_control_injection_stableaudio_open-1.py`  
+- `stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py`  
   真实 StableAudio Open 注入 smoke。
 
-- `scripts/smoke_control_dit_wrapper.py`  
+- `stable_audio_control/scripts/smoke_control_dit_wrapper.py`  
   专门验证 `control_dit.py` 接口链路（含 `melody_control` 提取与转换）。
 
 ---
@@ -188,4 +188,3 @@ out = model(
 2. 将 `control_projector` 从单层线性扩展为更强特征头（例如 LN + MLP）
 3. 引入显式 `melody_mask` 并在控制分支中使用
 4. 增加针对 `control_dit` 的单元测试（shape、dtype、cfg batch 对齐）
-

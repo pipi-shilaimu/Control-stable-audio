@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 # 允许直接以脚本方式运行，无需先安装本地包。
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stable_audio_control.models.control_transformer import ControlNetContinuousTransformer
 
@@ -82,7 +82,7 @@ def main() -> None:
         control_transformer.zero_linears[0].weight.normal_(mean=0.0, std=1e-3)
     run_pair("微扰 adapter 后（预期 diff>0）")
     # 基于真实模型的 smoke test（使用 get_pretrained_model）在：
-    # `scripts/smoke_control_injection_stableaudio_open.py`
+    # `stable_audio_control/scripts/smoke_control_injection_stableaudio_open-1.py`
 
 
 if __name__ == "__main__":

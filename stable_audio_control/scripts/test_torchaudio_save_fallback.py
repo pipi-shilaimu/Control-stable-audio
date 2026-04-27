@@ -5,7 +5,7 @@ import sys
 import torch
 import torchaudio
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stable_audio_control.audio_io import install_torchaudio_save_fallback
 
