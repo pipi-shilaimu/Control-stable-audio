@@ -4,5 +4,11 @@ pixart_alpha_fast and controllagle image generation with latent consistency mode
 Zhang_Adding_Conditional_Control_to_Text-to-Image_Diffusion_Models_ICCV_2023_paper.pdf
 tmp/
 C:\PROJECT\StableAudio\stable_audio_control\scripts\__pycache__\
-.claude\
-.idea\
+.claude/
+.idea/
+stable_audio_control/data/
+outputs/
+.venv/
+*.wav
+__pycache__/
+*.pyc

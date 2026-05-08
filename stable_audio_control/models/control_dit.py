@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from stable_audio_control.melody.conditioner import MelodyControlEncoder
 from stable_audio_control.models.control_transformer import ControlNetContinuousTransformer
 
 
@@ -21,6 +22,12 @@ class ControlConditionedDiffusionWrapper(nn.Module):
         control_id: str = "melody_control",
         default_control_scale: float = 1.0,
         control_interp_mode: str = "nearest",
+        melody_channels: int = 8,
+        melody_num_pitch_bins: int = 128,
+        melody_embedding_dim: int = 64,
+        melody_hidden_dim: int = 256,
+        melody_conv_layers: int = 2,
+        use_melody_encoder: bool = True,
     ) -> None:
         super().__init__()
 
@@ -28,6 +35,7 @@ class ControlConditionedDiffusionWrapper(nn.Module):
         self.control_id = control_id
         self.default_control_scale = float(default_control_scale)
         self.control_interp_mode = control_interp_mode
+        self.use_melody_encoder = bool(use_melody_encoder)
 
         base_transformer = self.model.model.transformer
         if not isinstance(base_transformer, ControlNetContinuousTransformer):
@@ -37,6 +45,23 @@ class ControlConditionedDiffusionWrapper(nn.Module):
             )
 
         self.control_dim_in = base_transformer.base.project_in.in_features
+        self.melody_encoder = (
+            MelodyControlEncoder(
+                num_pitch_bins=melody_num_pitch_bins,
+                melody_channels=melody_channels,
+                embedding_dim=melody_embedding_dim,
+                hidden_dim=melody_hidden_dim,
+                output_dim=self.control_dim_in,
+                conv_layers=melody_conv_layers,
+                interp_mode=control_interp_mode,
+            )
+            if self.use_melody_encoder
+            else None
+        )
+
+        # Fallback path for dense floating-point control features used by older
+        # smoke scripts and ad-hoc experiments. Integer CQT indices use
+        # `melody_encoder` above.
         self.control_projector = nn.LazyLinear(self.control_dim_in)
 
     # Properties are exposed to remain compatible with existing training code that
@@ -113,6 +138,14 @@ class ControlConditionedDiffusionWrapper(nn.Module):
             raise TypeError(f"`cond[{self.control_id}]` must be a Tensor or [Tensor, mask], got {type(control_tensor)}")
 
         control_tensor = control_tensor.to(device=device)
+
+        if self.melody_encoder is not None and not torch.is_floating_point(control_tensor):
+            return self.melody_encoder(
+                control_tensor,
+                target_len=target_len,
+                dtype=dtype,
+                device=device,
+            )
 
         if control_tensor.ndim == 2:
             control_tensor = control_tensor.unsqueeze(0)
@@ -205,6 +238,12 @@ def build_control_wrapper(
     control_id: str = "melody_control",
     default_control_scale: float = 1.0,
     freeze_base: bool = True,
+    melody_channels: int = 8,
+    melody_num_pitch_bins: int = 128,
+    melody_embedding_dim: int = 64,
+    melody_hidden_dim: int = 256,
+    melody_conv_layers: int = 2,
+    use_melody_encoder: bool = True,
 ) -> ControlConditionedDiffusionWrapper:
     """
     One-liner helper:
@@ -222,4 +261,10 @@ def build_control_wrapper(
         base_wrapper=wrapped,
         control_id=control_id,
         default_control_scale=default_control_scale,
+        melody_channels=melody_channels,
+        melody_num_pitch_bins=melody_num_pitch_bins,
+        melody_embedding_dim=melody_embedding_dim,
+        melody_hidden_dim=melody_hidden_dim,
+        melody_conv_layers=melody_conv_layers,
+        use_melody_encoder=use_melody_encoder,
     )

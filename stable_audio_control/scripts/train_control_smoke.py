@@ -95,7 +95,7 @@ def build_minimal_batch(
 
 
 def apply_freeze_policy(model: ControlConditionedDiffusionWrapper) -> List[str]:
-    """Freeze everything except control branch modules and control projector."""
+    """Freeze everything except control branch modules and melody control heads."""
     for param in model.parameters():
         if isinstance(param, UninitializedParameter):
             continue
@@ -105,14 +105,17 @@ def apply_freeze_policy(model: ControlConditionedDiffusionWrapper) -> List[str]:
     if not isinstance(transformer, ControlNetContinuousTransformer):
         raise TypeError("Expected ControlNetContinuousTransformer after build_control_wrapper.")
 
-    target_modules: Dict[str, nn.Module] = {
+    target_modules: Dict[str, nn.Module | None] = {
         "control_layers": transformer.control_layers,
         "zero_linears": transformer.zero_linears,
+        "melody_encoder": model.melody_encoder,
         "control_projector": model.control_projector,
     }
 
     trainable_names: List[str] = []
     for prefix, module in target_modules.items():
+        if module is None:
+            continue
         for name, param in module.named_parameters():
             if isinstance(param, UninitializedParameter):
                 continue
@@ -157,12 +160,22 @@ def initialize_lazy_parameters(
     device: torch.device,
     dtype: torch.dtype,
 ) -> None:
-    """Materialize lazy parameters (e.g. control projector) before optimizer creation."""
-    dummy_cond: Dict[str, Any] = {
+    """Materialize/check control conditioning modules before optimizer creation."""
+    index_cond: Dict[str, Any] = {
+        "melody_control": [torch.zeros((1, 8, 8), device=device, dtype=torch.long), None],
+    }
+    _ = model._extract_control_input(  # type: ignore[attr-defined]
+        cond=index_cond,
+        target_len=8,
+        dtype=dtype,
+        device=device,
+    )
+
+    dense_cond: Dict[str, Any] = {
         "melody_control": [torch.zeros((1, 8, 8), device=device, dtype=dtype), None],
     }
     _ = model._extract_control_input(  # type: ignore[attr-defined]
-        cond=dummy_cond,
+        cond=dense_cond,
         target_len=8,
         dtype=dtype,
         device=device,

@@ -11,6 +11,8 @@
 
 1. 不改 `stable_audio_tools` 源码（不改 `.venv`）的前提下，把预训练 StableAudio Open 的内部 `ContinuousTransformer` 替换为 `ControlNetContinuousTransformer`。
 2. 保持训练接口兼容 `DiffusionCondTrainingWrapper`，并把 `cond["melody_control"]` 自动转换成 `control_input` 传给 ControlNet 分支。
+   - 整数 CQT 索引会走 `MelodyControlEncoder`（pitch embedding + Conv1D）。
+   - 浮点控制特征会走旧的 `LazyLinear` fallback，保留 smoke / 临时实验兼容性。
 
 一句话总结：  
 `control_transformer.py` 负责“注入逻辑”，`control_dit.py` 负责“接口对接”。
@@ -80,7 +82,9 @@ output = diffusion(noised_latents, t, cond=conditioning, cfg_dropout_prob=...)
 1. 从 `cond` 提取 `melody_control`
 2. 长度对齐（插值到 `x` 的目标长度）
 3. 维度规范化（统一到 `[B, L, C]`）
-4. 通过 `LazyLinear` 投影到 `dim_in`
+4. 根据控制张量类型选择转换路径：
+   - 整数索引：`Embedding(129, E, padding_idx=0)` + Conv1D stack + 长度对齐；
+   - 浮点特征：`LazyLinear` 投影到 `dim_in`。
 5. 调用 base wrapper 时透传：
    - `control_input=...`
    - `control_scale=...`
@@ -128,7 +132,7 @@ cond = model.conditioner([{
     "seconds_total": 5,
 }], device)
 
-cond["melody_control"] = [torch.randn(1, 8, 128, device=device), None]
+cond["melody_control"] = [torch.randint(1, 129, (1, 8, 128), device=device), None]
 
 out = model(
     x, t,
@@ -185,6 +189,6 @@ out = model(
 ## 9. 后续扩展建议（V2）
 
 1. 支持 `negative_melody_control`（给 CFG 无条件分支单独控制）
-2. 将 `control_projector` 从单层线性扩展为更强特征头（例如 LN + MLP）
+2. 为 `MelodyControlEncoder` 接入 progressive curriculum masking
 3. 引入显式 `melody_mask` 并在控制分支中使用
 4. 增加针对 `control_dit` 的单元测试（shape、dtype、cfg batch 对齐）

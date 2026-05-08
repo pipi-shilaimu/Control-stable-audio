@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
 import json
 import random
 import sys
@@ -15,6 +17,7 @@ from torch.nn.parameter import UninitializedParameter
 # Allow script execution without installing local package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from stable_audio_control.audio_io import install_torchaudio_load_fallback  # noqa: E402
 from stable_audio_control.melody.cqt_topk import CQTTopKConfig, CQTTopKExtractor  # noqa: E402
 from stable_audio_control.models import (  # noqa: E402
     ControlConditionedDiffusionWrapper,
@@ -25,6 +28,52 @@ from stable_audio_tools import get_pretrained_model  # noqa: E402
 from stable_audio_tools.data.dataset import create_dataloader_from_config  # noqa: E402
 from stable_audio_tools.models.diffusion import ConditionedDiffusionModelWrapper  # noqa: E402
 from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper  # noqa: E402
+
+
+install_torchaudio_load_fallback()
+
+
+def patch_stable_audio_tools_inverse_lr_for_torch() -> None:
+    """Patch stable-audio-tools' InverseLR for PyTorch versions without `verbose`."""
+    from stable_audio_tools.training import utils as training_utils
+
+    base_scheduler = getattr(torch.optim.lr_scheduler, "LRScheduler", torch.optim.lr_scheduler._LRScheduler)
+    if "verbose" in inspect.signature(base_scheduler.__init__).parameters:
+        return
+
+    original_inverse_lr = training_utils.InverseLR
+    if getattr(original_inverse_lr, "_stable_audio_control_torch_compat", False):
+        return
+
+    class CompatibleInverseLR(original_inverse_lr):  # type: ignore[misc, valid-type]
+        _stable_audio_control_torch_compat = True
+
+        def __init__(
+            self,
+            optimizer,
+            inv_gamma=1.0,
+            power=1.0,
+            warmup=0.0,
+            final_lr=0.0,
+            last_epoch=-1,
+            verbose=False,
+        ):
+            self.inv_gamma = inv_gamma
+            self.power = power
+            if not 0.0 <= warmup < 1:
+                raise ValueError("Invalid value for warmup")
+            self.warmup = warmup
+            self.final_lr = final_lr
+            self.verbose = verbose
+            torch.optim.lr_scheduler._LRScheduler.__init__(self, optimizer, last_epoch=last_epoch)
+
+    CompatibleInverseLR.__name__ = original_inverse_lr.__name__
+    CompatibleInverseLR.__qualname__ = original_inverse_lr.__qualname__
+    CompatibleInverseLR.__doc__ = original_inverse_lr.__doc__
+    training_utils.InverseLR = CompatibleInverseLR
+
+
+patch_stable_audio_tools_inverse_lr_for_torch()
 
 
 def set_seed(seed: int) -> None:
@@ -91,6 +140,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-id", type=str, default="melody_control")
     parser.add_argument("--default-control-scale", type=float, default=1.0)
     parser.add_argument("--freeze-base", type=_str_to_bool, default=True)
+    parser.add_argument("--melody-embedding-dim", type=int, default=64)
+    parser.add_argument("--melody-hidden-dim", type=int, default=256)
+    parser.add_argument("--melody-conv-layers", type=int, default=2)
 
     # CQT args
     parser.add_argument("--top-k", type=int, default=4, help="Top-k bins per stereo channel.")
@@ -111,12 +163,22 @@ def initialize_lazy_parameters(
     dtype: torch.dtype,
     control_channels: int,
 ) -> None:
-    """Materialize lazy parameters (e.g. control_projector) before trainer starts."""
-    dummy_cond: Dict[str, Any] = {
-        "melody_control": [torch.zeros((1, control_channels, 8), device=device, dtype=dtype), None],
+    """Materialize/check control conditioning modules before trainer starts."""
+    index_cond: Dict[str, Any] = {
+        model.control_id: [torch.zeros((1, control_channels, 8), device=device, dtype=torch.long), None],
     }
     _ = model._extract_control_input(  # type: ignore[attr-defined]
-        cond=dummy_cond,
+        cond=index_cond,
+        target_len=8,
+        dtype=dtype,
+        device=device,
+    )
+
+    dense_cond: Dict[str, Any] = {
+        model.control_id: [torch.zeros((1, control_channels, 8), device=device, dtype=dtype), None],
+    }
+    _ = model._extract_control_input(  # type: ignore[attr-defined]
+        cond=dense_cond,
         target_len=8,
         dtype=dtype,
         device=device,
@@ -134,14 +196,17 @@ def apply_control_only_freeze_policy(model: ControlConditionedDiffusionWrapper) 
     if not isinstance(transformer, ControlNetContinuousTransformer):
         raise TypeError("Expected ControlNetContinuousTransformer after build_control_wrapper.")
 
-    target_modules: Dict[str, nn.Module] = {
+    target_modules: Dict[str, Optional[nn.Module]] = {
         "control_layers": transformer.control_layers,
         "zero_linears": transformer.zero_linears,
+        "melody_encoder": model.melody_encoder,
         "control_projector": model.control_projector,
     }
 
     trainable_names: List[str] = []
     for prefix, module in target_modules.items():
+        if module is None:
+            continue
         for name, param in module.named_parameters():
             if isinstance(param, UninitializedParameter):
                 continue
@@ -219,7 +284,7 @@ class MelodyAwareDiffusionCondTrainingWrapper(DiffusionCondTrainingWrapper):
         super().__init__(*args, **kwargs)
         self.melody_augmenter = melody_augmenter
 
-    def _set_melody_batch(self, batch) -> None:
+    def _prepare_batch(self, batch):
         reals = batch[0]
         if reals.ndim == 4 and reals.shape[0] == 1:
             reals = reals[0]
@@ -230,14 +295,34 @@ class MelodyAwareDiffusionCondTrainingWrapper(DiffusionCondTrainingWrapper):
             )
 
         self.melody_augmenter.set_batch_audio(reals)
+        return reals, normalize_metadata_padding_masks(batch[1])
 
     def training_step(self, batch, batch_idx):
-        self._set_melody_batch(batch)
+        batch = self._prepare_batch(batch)
         return super().training_step(batch, batch_idx)
 
     def validation_step(self, batch, batch_idx):
-        self._set_melody_batch(batch)
+        batch = self._prepare_batch(batch)
         return super().validation_step(batch, batch_idx)
+
+
+def normalize_metadata_padding_masks(metadata: Any) -> List[Dict[str, Any]]:
+    """Wrap bare audio_dir padding-mask tensors in the container expected upstream."""
+    normalized: List[Dict[str, Any]] = []
+    for item in metadata:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+
+        padding_mask = item.get("padding_mask")
+        if isinstance(padding_mask, torch.Tensor):
+            item = dict(item)
+            item["padding_mask"] = [padding_mask]
+        elif isinstance(padding_mask, tuple):
+            item = dict(item)
+            item["padding_mask"] = list(padding_mask)
+        normalized.append(item)
+    return normalized
 
 
 def create_training_wrapper(
@@ -278,6 +363,60 @@ def load_json(path: str) -> Dict[str, Any]:
         return json.load(fp)
 
 
+def _importable_module_name_from_path(module_path: Path) -> Optional[str]:
+    repo_root = Path(__file__).resolve().parents[2]
+    resolved = module_path.resolve()
+    try:
+        relative = resolved.relative_to(repo_root)
+    except ValueError:
+        return None
+
+    if relative.suffix != ".py" or relative.name == "__init__.py":
+        return None
+
+    package_parts = relative.with_suffix("").parts
+    package_dir = repo_root
+    for part in package_parts[:-1]:
+        package_dir = package_dir / part
+        if not (package_dir / "__init__.py").exists():
+            return None
+
+    return ".".join(package_parts)
+
+
+def make_dataloader_custom_metadata_picklable(dataloader: Any, dataset_config: Dict[str, Any]) -> None:
+    """
+    Replace stable-audio-tools' temporary `metadata_module` functions with package imports.
+
+    On Windows, DataLoader workers use spawn and must pickle the Dataset.  The upstream
+    loader imports custom metadata files as a temporary module named `metadata_module`,
+    which cannot be imported again in the worker process.  When the same file is part of
+    this repo's package tree, the package-level function is picklable and equivalent.
+    """
+    dataset = getattr(dataloader, "dataset", None)
+    custom_metadata_fns = getattr(dataset, "custom_metadata_fns", None)
+    if not isinstance(custom_metadata_fns, dict):
+        return
+
+    for audio_dir_config in dataset_config.get("datasets", []):
+        audio_dir_path = audio_dir_config.get("path")
+        custom_metadata_module = audio_dir_config.get("custom_metadata_module")
+        if audio_dir_path is None or custom_metadata_module is None:
+            continue
+
+        module_name = _importable_module_name_from_path(Path(custom_metadata_module))
+        if module_name is None:
+            continue
+
+        metadata_module = importlib.import_module(module_name)
+        custom_metadata_fn = metadata_module.get_custom_metadata
+        configured_path = Path(audio_dir_path).resolve()
+
+        for existing_path in list(custom_metadata_fns.keys()):
+            if Path(existing_path).resolve() == configured_path:
+                custom_metadata_fns[existing_path] = custom_metadata_fn
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
     set_seed(args.seed)
@@ -297,6 +436,11 @@ def main() -> None:
         control_id=args.control_id,
         default_control_scale=args.default_control_scale,
         freeze_base=args.freeze_base,
+        melody_channels=args.top_k * 2,
+        melody_num_pitch_bins=args.n_bins,
+        melody_embedding_dim=args.melody_embedding_dim,
+        melody_hidden_dim=args.melody_hidden_dim,
+        melody_conv_layers=args.melody_conv_layers,
     )
     control_model = cast(ControlConditionedDiffusionWrapper, control_model)
 
@@ -348,6 +492,7 @@ def main() -> None:
         num_workers=effective_num_workers,
         shuffle=True,
     )
+    make_dataloader_custom_metadata_picklable(train_dl, dataset_config)
 
     training_wrapper = create_training_wrapper(
         model_config=model_config,

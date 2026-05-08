@@ -175,7 +175,7 @@ cond["melody_control"] = [melody_indices, None]
 
 1. 长度对齐（`F -> target_len`）
 2. `dtype` 转浮点
-3. `LazyLinear` 投影到 transformer 的 `dim_in`
+3. 整数 CQT 索引进入 `MelodyControlEncoder`，经过 pitch embedding + Conv1D stack 后对齐到 transformer 的 `dim_in`
 
 这也是 `stable_audio_control/scripts/train_control_smoke.py` 的实际接法。
 

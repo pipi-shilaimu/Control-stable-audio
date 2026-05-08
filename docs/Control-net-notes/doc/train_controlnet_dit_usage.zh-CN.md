@@ -26,7 +26,7 @@
 1. 加载 `stabilityai/stable-audio-open-1.0` 预训练模型。
 2. 挂接 `ControlNetContinuousTransformer`（通过 `build_control_wrapper(...)`）。
 3. 在每个训练 step 里，把当前 batch 的真实音频在线提取为 top-k CQT，并注入 `cond["melody_control"]`。
-4. 仅训练控制分支相关参数（`control_layers` / `zero_linears` / `control_projector`）。
+4. 仅训练控制分支相关参数（`control_layers` / `zero_linears` / `melody_encoder`，以及浮点控制 fallback 的 `control_projector`）。
 5. 使用 `pytorch_lightning.Trainer` 执行持续训练。
 
 ---
@@ -117,6 +117,9 @@
 - `--control-id`（默认 `melody_control`）
 - `--default-control-scale`（默认 `1.0`）
 - `--freeze-base`（默认 `true`）
+- `--melody-embedding-dim`（默认 `64`）
+- `--melody-hidden-dim`（默认 `256`）
+- `--melody-conv-layers`（默认 `2`）
 
 ### 5.5 CQT 参数
 
@@ -157,14 +160,15 @@
 2. 创建 `MelodyControlAugmenter` 包装原 conditioner。
 3. 在每个 batch 上从真实 waveform 提取 `melody_control` 并写入 `cond`。
 
-### Step E：初始化 Lazy 参数 + 冻结策略
+### Step E：初始化控制头 + 冻结策略
 
-1. `initialize_lazy_parameters(...)` 显式 materialize `control_projector`。
+1. `initialize_lazy_parameters(...)` 显式检查整数 CQT 路径的 `melody_encoder`，并 materialize 浮点 fallback 的 `control_projector`。
 2. `apply_control_only_freeze_policy(...)`：
    - 先冻结所有参数；
    - 再只放开：
      - `control_layers`
      - `zero_linears`
+     - `melody_encoder`
      - `control_projector`
 
 ### Step F：创建 dataloader
@@ -229,7 +233,7 @@ trainer.fit(training_wrapper, train_dataloaders=train_dl, ckpt_path=args.ckpt_pa
 ### 2) `No trainable parameters left...`
 
 - 原因：冻结策略后没有可训练参数（通常是包装对象不符合预期或初始化过程被改动）。
-- 处理：确认 `build_control_wrapper(...)` 正常返回且 `control_projector` 已 materialize。
+- 处理：确认 `build_control_wrapper(...)` 正常返回，`melody_encoder` 已创建，且 `control_projector` fallback 已 materialize。
 
 ### 3) `pre_encoded=True is not supported...`
 
