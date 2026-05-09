@@ -21,7 +21,7 @@ from stable_audio_control.inference.control_compare import (  # noqa: E402
     save_audio_tensor,
     write_compare_metadata,
 )
-from stable_audio_control.melody.cqt_topk import CQTTopKConfig, CQTTopKExtractor  # noqa: E402
+from stable_audio_control.melody.extractors import build_melody_extractor, melody_control_channels  # noqa: E402
 from stable_audio_control.models import ControlConditionedDiffusionWrapper, build_control_wrapper  # noqa: E402
 from stable_audio_tools import get_pretrained_model  # noqa: E402
 from stable_audio_tools.inference.generation import generate_diffusion_cond  # noqa: E402
@@ -71,6 +71,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--melody-hidden-dim", type=int, default=256)
     parser.add_argument("--melody-conv-layers", type=int, default=2)
 
+    # Melody feature args must match the training run.
+    parser.add_argument(
+        "--melody-feature",
+        type=str,
+        choices=["cqt", "chromagram"],
+        default="cqt",
+        help="Melody control feature extractor used by the checkpoint.",
+    )
+
     # CQT args must match the training run.
     parser.add_argument("--top-k", type=int, default=4)
     parser.add_argument("--n-bins", type=int, default=128)
@@ -79,6 +88,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hop-length", type=int, default=512)
     parser.add_argument("--highpass-cutoff-hz", type=float, default=261.2)
     parser.add_argument("--cqt-backend", type=str, choices=["auto", "nnaudio", "librosa"], default="auto")
+
+    # Chromagram args must match the training run.
+    parser.add_argument("--chroma-bins", type=int, default=12)
+    parser.add_argument("--chroma-n-fft", type=int, default=2048)
 
     return parser
 
@@ -196,17 +209,24 @@ def main() -> None:
     print(f"loading control model: {args.model_name}")
     control_base_model, _control_model_config = get_pretrained_model(args.model_name)
     control_base_model = cast(ConditionedDiffusionModelWrapper, control_base_model)
+    control_channels = melody_control_channels(
+        args.melody_feature,
+        top_k=int(args.top_k),
+        chroma_bins=int(args.chroma_bins),
+    )
+    uses_discrete_melody = args.melody_feature == "cqt"
     control_model = build_control_wrapper(
         base_wrapper=control_base_model,
         num_control_layers=int(args.num_control_layers),
         control_id=args.control_id,
         default_control_scale=float(args.control_scale),
         freeze_base=True,
-        melody_channels=int(args.top_k) * 2,
+        melody_channels=control_channels,
         melody_num_pitch_bins=int(args.n_bins),
         melody_embedding_dim=int(args.melody_embedding_dim),
         melody_hidden_dim=int(args.melody_hidden_dim),
         melody_conv_layers=int(args.melody_conv_layers),
+        use_melody_encoder=uses_discrete_melody,
     )
     control_model = cast(ControlConditionedDiffusionWrapper, control_model)
 
@@ -214,7 +234,7 @@ def main() -> None:
         control_model,
         device=torch.device("cpu"),
         dtype=next(control_model.parameters()).dtype,
-        control_channels=int(args.top_k) * 2,
+        control_channels=control_channels,
     )
     checkpoint_load = load_control_checkpoint(control_model, args.ckpt_path, prefer_ema=bool(args.prefer_ema))
     print(f"checkpoint loaded: use_ema={checkpoint_load['use_ema']}")
@@ -230,17 +250,18 @@ def main() -> None:
         target_sample_size=sample_size,
         device=device,
     )
-    extractor = CQTTopKExtractor(
-        CQTTopKConfig(
-            sample_rate=sample_rate,
-            fmin_hz=float(args.fmin_hz),
-            highpass_cutoff_hz=float(args.highpass_cutoff_hz),
-            n_bins=int(args.n_bins),
-            bins_per_octave=int(args.bins_per_octave),
-            hop_length=int(args.hop_length),
-            top_k=int(args.top_k),
-            backend=args.cqt_backend,
-        )
+    extractor = build_melody_extractor(
+        feature=args.melody_feature,
+        sample_rate=sample_rate,
+        fmin_hz=float(args.fmin_hz),
+        highpass_cutoff_hz=float(args.highpass_cutoff_hz),
+        n_bins=int(args.n_bins),
+        bins_per_octave=int(args.bins_per_octave),
+        hop_length=int(args.hop_length),
+        top_k=int(args.top_k),
+        cqt_backend=args.cqt_backend,
+        chroma_bins=int(args.chroma_bins),
+        chroma_n_fft=int(args.chroma_n_fft),
     )
     melody_control = extractor.extract(reference_audio).to(device=device)
 
@@ -278,8 +299,10 @@ def main() -> None:
     save_audio_tensor(control_output_path, control_audio, sample_rate)
 
     control_config = {
+        "melody_feature": args.melody_feature,
         "num_control_layers": int(args.num_control_layers),
         "control_id": args.control_id,
+        "control_channels": int(control_channels),
         "top_k": int(args.top_k),
         "n_bins": int(args.n_bins),
         "bins_per_octave": int(args.bins_per_octave),
@@ -287,6 +310,8 @@ def main() -> None:
         "hop_length": int(args.hop_length),
         "highpass_cutoff_hz": float(args.highpass_cutoff_hz),
         "cqt_backend": args.cqt_backend,
+        "chroma_bins": int(args.chroma_bins),
+        "chroma_n_fft": int(args.chroma_n_fft),
         "melody_embedding_dim": int(args.melody_embedding_dim),
         "melody_hidden_dim": int(args.melody_hidden_dim),
         "melody_conv_layers": int(args.melody_conv_layers),

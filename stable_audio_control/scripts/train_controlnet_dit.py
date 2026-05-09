@@ -18,7 +18,11 @@ from torch.nn.parameter import UninitializedParameter
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from stable_audio_control.audio_io import install_torchaudio_load_fallback  # noqa: E402
-from stable_audio_control.melody.cqt_topk import CQTTopKConfig, CQTTopKExtractor  # noqa: E402
+from stable_audio_control.melody.extractors import (  # noqa: E402
+    MelodyExtractor,
+    build_melody_extractor,
+    melody_control_channels,
+)
 from stable_audio_control.models import (  # noqa: E402
     ControlConditionedDiffusionWrapper,
     ControlNetContinuousTransformer,
@@ -95,7 +99,7 @@ def _str_to_bool(value: str) -> bool:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train ControlNet-DiT on StableAudio Open with top-k CQT melody control."
+        description="Train ControlNet-DiT on StableAudio Open with selectable melody control features."
     )
     parser.add_argument("--dataset-config", type=str, required=True, help="Path to dataset config JSON.")
     parser.add_argument(
@@ -144,6 +148,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--melody-hidden-dim", type=int, default=256)
     parser.add_argument("--melody-conv-layers", type=int, default=2)
 
+    # Melody feature args
+    parser.add_argument(
+        "--melody-feature",
+        type=str,
+        choices=["cqt", "chromagram"],
+        default="cqt",
+        help="Melody control feature extractor. Defaults to the existing top-k CQT path.",
+    )
+
     # CQT args
     parser.add_argument("--top-k", type=int, default=4, help="Top-k bins per stereo channel.")
     parser.add_argument("--n-bins", type=int, default=128)
@@ -152,6 +165,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hop-length", type=int, default=512)
     parser.add_argument("--highpass-cutoff-hz", type=float, default=261.2)
     parser.add_argument("--cqt-backend", type=str, choices=["auto", "nnaudio", "librosa"], default="auto")
+
+    # Chromagram args
+    parser.add_argument("--chroma-bins", type=int, default=12, help="Chromagram pitch-class bins.")
+    parser.add_argument("--chroma-n-fft", type=int, default=2048, help="Chromagram STFT size.")
 
     return parser
 
@@ -228,12 +245,16 @@ class MelodyControlAugmenter(nn.Module):
         self,
         base_conditioner: nn.Module,
         control_id: str,
-        extractor: CQTTopKExtractor,
+        extractor: MelodyExtractor,
+        control_channels: int,
+        empty_dtype: torch.dtype,
     ) -> None:
         super().__init__()
         self.base_conditioner = base_conditioner
         self.control_id = control_id
         self.extractor = extractor
+        self.control_channels = int(control_channels)
+        self.empty_dtype = empty_dtype
         self._batch_audio: Optional[torch.Tensor] = None
 
     def set_batch_audio(self, audio: torch.Tensor) -> None:
@@ -258,8 +279,10 @@ class MelodyControlAugmenter(nn.Module):
         conditioning = self.base_conditioner(metadata, device)
 
         if not metadata:
-            channels = self.extractor.config.top_k * 2
-            conditioning[self.control_id] = [torch.zeros((0, channels, 1), device=device, dtype=torch.long), None]
+            conditioning[self.control_id] = [
+                torch.zeros((0, self.control_channels, 1), device=device, dtype=self.empty_dtype),
+                None,
+            ]
             return conditioning
 
         if self._batch_audio is None:
@@ -430,40 +453,51 @@ def main() -> None:
     base_model, model_config = get_pretrained_model(args.model_name)
     base_model = cast(ConditionedDiffusionModelWrapper, base_model)
 
+    control_channels = melody_control_channels(
+        args.melody_feature,
+        top_k=args.top_k,
+        chroma_bins=args.chroma_bins,
+    )
+    uses_discrete_melody = args.melody_feature == "cqt"
+
     control_model = build_control_wrapper(
         base_wrapper=base_model,
         num_control_layers=args.num_control_layers,
         control_id=args.control_id,
         default_control_scale=args.default_control_scale,
         freeze_base=args.freeze_base,
-        melody_channels=args.top_k * 2,
+        melody_channels=control_channels,
         melody_num_pitch_bins=args.n_bins,
         melody_embedding_dim=args.melody_embedding_dim,
         melody_hidden_dim=args.melody_hidden_dim,
         melody_conv_layers=args.melody_conv_layers,
+        use_melody_encoder=uses_discrete_melody,
     )
     control_model = cast(ControlConditionedDiffusionWrapper, control_model)
 
     sample_rate = int(model_config["sample_rate"])
     model_dtype = next(control_model.parameters()).dtype
 
-    extractor = CQTTopKExtractor(
-        CQTTopKConfig(
-            sample_rate=sample_rate,
-            fmin_hz=args.fmin_hz,
-            highpass_cutoff_hz=args.highpass_cutoff_hz,
-            n_bins=args.n_bins,
-            bins_per_octave=args.bins_per_octave,
-            hop_length=args.hop_length,
-            top_k=args.top_k,
-            backend=args.cqt_backend,
-        )
+    extractor = build_melody_extractor(
+        feature=args.melody_feature,
+        sample_rate=sample_rate,
+        fmin_hz=args.fmin_hz,
+        highpass_cutoff_hz=args.highpass_cutoff_hz,
+        n_bins=args.n_bins,
+        bins_per_octave=args.bins_per_octave,
+        hop_length=args.hop_length,
+        top_k=args.top_k,
+        cqt_backend=args.cqt_backend,
+        chroma_bins=args.chroma_bins,
+        chroma_n_fft=args.chroma_n_fft,
     )
 
     melody_augmenter = MelodyControlAugmenter(
         base_conditioner=cast(nn.Module, control_model.base_wrapper.conditioner),
         control_id=args.control_id,
         extractor=extractor,
+        control_channels=control_channels,
+        empty_dtype=torch.long if uses_discrete_melody else torch.float32,
     )
     control_model.base_wrapper.conditioner = melody_augmenter
 
@@ -471,7 +505,7 @@ def main() -> None:
         control_model,
         device=torch.device("cpu"),
         dtype=model_dtype,
-        control_channels=args.top_k * 2,
+        control_channels=control_channels,
     )
     trainable_names = apply_control_only_freeze_policy(control_model)
 
@@ -522,6 +556,7 @@ def main() -> None:
 
     print(f"model_name={args.model_name}")
     print(f"dataset_config={dataset_config_path.resolve()}")
+    print(f"melody_feature={args.melody_feature}, control_channels={control_channels}")
     print(f"sample_rate={sample_rate}, sample_size={model_config['sample_size']}, batch_size={args.batch_size}")
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")

@@ -126,6 +126,9 @@ class ControlNetGenerationCompareTests(unittest.TestCase):
         self.assertEqual(args.metadata_name, "compare.json")
         self.assertEqual(args.seed, 0)
         self.assertEqual(args.steps, 8)
+        self.assertEqual(args.melody_feature, "cqt")
+        self.assertEqual(args.chroma_bins, 12)
+        self.assertEqual(args.chroma_n_fft, 2048)
         self.assertTrue(args.prefer_ema)
 
     def test_compare_script_rejects_dpmpp_3m_sde_single_step(self) -> None:

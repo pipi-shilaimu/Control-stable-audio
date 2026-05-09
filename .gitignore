@@ -12,3 +12,4 @@ outputs/
 *.wav
 __pycache__/
 *.pyc
+data.zip

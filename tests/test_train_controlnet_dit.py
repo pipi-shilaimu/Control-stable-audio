@@ -28,9 +28,12 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         args = parser.parse_args(["--dataset-config", "dummy_dataset.json"])
 
         self.assertEqual(args.model_name, "stabilityai/stable-audio-open-1.0")
+        self.assertEqual(args.melody_feature, "cqt")
         self.assertEqual(args.num_control_layers, 2)
         self.assertEqual(args.control_id, "melody_control")
         self.assertEqual(args.cqt_backend, "auto")
+        self.assertEqual(args.chroma_bins, 12)
+        self.assertEqual(args.chroma_n_fft, 2048)
         self.assertEqual(args.top_k, 4)
         self.assertEqual(args.melody_embedding_dim, 64)
         self.assertEqual(args.melody_hidden_dim, 256)
