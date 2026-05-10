@@ -134,16 +134,18 @@ class CQTTopKExtractor:
         return magnitude.to(audio.device)
 
     def extract(self, audio: torch.Tensor) -> torch.LongTensor:
-        normalized = self._normalize_audio(audio)
-        filtered = self._highpass(normalized)
+        normalized = self._normalize_audio(audio).to(torch.float32)
 
-        if self._backend == "nnaudio":
-            magnitude = self._cqt_with_nnaudio(filtered)
-        else:
-            magnitude = self._cqt_with_librosa(filtered)
+        with torch.amp.autocast(device_type=normalized.device.type, enabled=False):
+            filtered = self._highpass(normalized)
 
-        # [B, 2, n_bins, F] -> top-k over n_bins -> [B, 2, K, F]
-        _, topk_idx = torch.topk(magnitude, k=self.config.top_k, dim=2, largest=True, sorted=True)
+            if self._backend == "nnaudio":
+                magnitude = self._cqt_with_nnaudio(filtered)
+            else:
+                magnitude = self._cqt_with_librosa(filtered)
+
+            # [B, 2, n_bins, F] -> top-k over n_bins -> [B, 2, K, F]
+            _, topk_idx = torch.topk(magnitude, k=self.config.top_k, dim=2, largest=True, sorted=True)
 
         # 1-based index in 1..n_bins; reserve 0 for mask.
         topk_idx = topk_idx + 1
