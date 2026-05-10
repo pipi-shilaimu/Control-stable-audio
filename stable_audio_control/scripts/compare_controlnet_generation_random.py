@@ -361,6 +361,13 @@ def _build_control_config(args: argparse.Namespace, *, control_channels: int) ->
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    ckpt_path = Path(args.ckpt_path)
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {ckpt_path}. "
+            "Check that this path exists inside the current container/session. "
+            "If the file is on the host or in another container, mount/copy it so the script can see it."
+        )
     if args.sampler_type == "dpmpp-3m-sde" and int(args.steps) < 2:
         raise ValueError("dpmpp-3m-sde requires --steps >= 2; use a different sampler for single-step smoke tests.")
 
@@ -378,6 +385,34 @@ def _summarize_scores(items: list[dict[str, Any]]) -> dict[str, Any]:
         "min_score": float(min(scores)) if scores else None,
         "max_score": float(max(scores)) if scores else None,
     }
+
+
+def format_similarity_progress_line(
+    *,
+    index: int,
+    total: int,
+    similarity: dict[str, Any],
+    output_path: Path,
+) -> str:
+    metric_name = similarity["metric_name"]
+    score = float(similarity["score"])
+    return (
+        f"[{index + 1}/{total}] similarity_score={score:.6f} "
+        f"metric={metric_name} metadata={output_path.as_posix()}"
+    )
+
+
+def format_similarity_summary_line(aggregate: dict[str, Any]) -> str:
+    metric_name = aggregate["metric_name"]
+    mean_score = aggregate["mean_score"]
+    min_score = aggregate["min_score"]
+    max_score = aggregate["max_score"]
+    if mean_score is None or min_score is None or max_score is None:
+        return f"similarity_summary metric={metric_name} mean=None min=None max=None"
+    return (
+        f"similarity_summary metric={metric_name} "
+        f"mean={float(mean_score):.6f} min={float(min_score):.6f} max={float(max_score):.6f}"
+    )
 
 
 def main() -> None:
@@ -489,6 +524,14 @@ def main() -> None:
             **_build_similarity_kwargs(args, sample_rate=sample_rate, sample_size=sample_size),
         )
         write_similarity_metadata(similarity_output_path, similarity)
+        print(
+            format_similarity_progress_line(
+                index=item.index,
+                total=len(plan),
+                similarity=similarity["similarity"],
+                output_path=similarity_output_path,
+            )
+        )
 
         items.append(
             {
@@ -513,6 +556,7 @@ def main() -> None:
         del control_audio
         _empty_cuda_cache()
 
+    aggregate = _summarize_scores(items)
     summary = {
         "schema_version": 1,
         "model_name": args.model_name,
@@ -546,7 +590,7 @@ def main() -> None:
         },
         "similarity": {
             "config": _build_similarity_kwargs(args, sample_rate=sample_rate, sample_size=sample_size),
-            "aggregate": _summarize_scores(items),
+            "aggregate": aggregate,
         },
         "items": items,
     }
@@ -556,6 +600,7 @@ def main() -> None:
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    print(format_similarity_summary_line(aggregate))
     print(f"summary -> {summary_path}")
 
 

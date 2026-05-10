@@ -102,6 +102,48 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
         else:
             self.fail("Expected RuntimeError")
 
+    def test_validate_args_rejects_missing_checkpoint_before_model_load(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "--ckpt-path",
+                "missing-model.ckpt",
+                "--prompt",
+                "a clear melody",
+            ]
+        )
+
+        with self.assertRaisesRegex(FileNotFoundError, "Checkpoint not found"):
+            module.validate_args(args)
+
+    def test_formats_similarity_progress_and_summary_lines(self) -> None:
+        module = _load_batch_script_module()
+
+        item_line = module.format_similarity_progress_line(
+            index=1,
+            total=3,
+            similarity={"metric_name": "cqt_topk_pitch_overlap_rate", "score": 0.8123456},
+            output_path=Path("sample/similarity.json"),
+        )
+        self.assertIn("[2/3]", item_line)
+        self.assertIn("similarity_score=0.812346", item_line)
+        self.assertIn("metric=cqt_topk_pitch_overlap_rate", item_line)
+        self.assertIn("sample/similarity.json", item_line)
+
+        summary_line = module.format_similarity_summary_line(
+            {
+                "metric_name": "cqt_topk_pitch_overlap_rate",
+                "mean_score": 0.7,
+                "min_score": 0.5,
+                "max_score": 0.9,
+            }
+        )
+        self.assertEqual(
+            summary_line,
+            "similarity_summary metric=cqt_topk_pitch_overlap_rate mean=0.700000 min=0.500000 max=0.900000",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
