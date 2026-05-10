@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python \"c:/PROJECT/StableAudio/scripts/train_control_smoke.py\")"
+      "Bash(python \"c:/PROJECT/StableAudio/scripts/train_control_smoke.py\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from stable_audio_tools import get_pretrained_model; model, config = get_pretrained_model\\('stabilityai/stable-audio-open-1.0'\\); transformer = model.model.model.transformer; print\\('transformer type:', type\\(transformer\\).__name__\\); print\\('num layers:', len\\(transformer.layers\\)\\); print\\('dim:', getattr\\(transformer, 'dim', 'N/A'\\)\\); print\\('dim_in:', getattr\\(transformer, 'project_in', None\\).in_features if hasattr\\(transformer, 'project_in'\\) else 'N/A'\\); print\\('dim_out:', getattr\\(transformer, 'project_out', None\\).out_features if hasattr\\(transformer, 'project_out'\\) else 'N/A'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from stable_audio_tools import get_pretrained_model; model, config = get_pretrained_model\\('stabilityai/stable-audio-open-1.0'\\); transformer = model.model.model.transformer; print\\('transformer type:', type\\(transformer\\).__name__\\); print\\('num layers:', len\\(transformer.layers\\)\\); print\\('dim:', getattr\\(transformer, 'dim', 'N/A'\\)\\)\")"
     ]
   }
 }

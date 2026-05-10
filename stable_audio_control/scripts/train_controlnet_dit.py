@@ -140,7 +140,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-ema", type=_str_to_bool, default=True, help="Enable EMA in training wrapper.")
 
     # ControlNet args
-    parser.add_argument("--num-control-layers", type=int, default=2)
+    parser.add_argument("--num-control-layers", type=int, default=12)
     parser.add_argument("--control-id", type=str, default="melody_control")
     parser.add_argument("--default-control-scale", type=float, default=1.0)
     parser.add_argument("--freeze-base", type=_str_to_bool, default=True)
