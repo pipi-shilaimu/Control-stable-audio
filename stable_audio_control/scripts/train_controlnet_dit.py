@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import inspect
 import json
@@ -348,6 +349,49 @@ def normalize_metadata_padding_masks(metadata: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _override_optimizer_config_learning_rate(
+    optimizer_configs: Dict[str, Any],
+    learning_rate: float,
+) -> None:
+    updated = 0
+    for optimizer_config in optimizer_configs.values():
+        if not isinstance(optimizer_config, dict):
+            continue
+        optimizer = optimizer_config.get("optimizer")
+        if not isinstance(optimizer, dict):
+            continue
+        config = optimizer.setdefault("config", {})
+        if not isinstance(config, dict):
+            raise TypeError("optimizer config must be a mapping when overriding --learning-rate.")
+        config["lr"] = float(learning_rate)
+        updated += 1
+
+    if updated == 0:
+        raise ValueError("Could not find optimizer config entries to override with --learning-rate.")
+
+
+def resolve_training_optimizer_settings(
+    *,
+    model_config: Dict[str, Any],
+    learning_rate_override: Optional[float],
+) -> tuple[Optional[float], Optional[Dict[str, Any]]]:
+    training_config = model_config.get("training", {})
+    optimizer_configs = training_config.get("optimizer_configs", None)
+    optimizer_configs = copy.deepcopy(optimizer_configs) if optimizer_configs is not None else None
+
+    if learning_rate_override is not None:
+        learning_rate = float(learning_rate_override)
+        if optimizer_configs is not None:
+            _override_optimizer_config_learning_rate(optimizer_configs, learning_rate)
+            return None, optimizer_configs
+        return learning_rate, None
+
+    learning_rate = training_config.get("learning_rate")
+    if learning_rate is None and optimizer_configs is None:
+        learning_rate = 5e-5
+    return learning_rate, optimizer_configs
+
+
 def create_training_wrapper(
     *,
     model_config: Dict[str, Any],
@@ -357,11 +401,10 @@ def create_training_wrapper(
     use_ema_override: bool,
 ) -> MelodyAwareDiffusionCondTrainingWrapper:
     training_config = model_config.get("training", {})
-    optimizer_configs = training_config.get("optimizer_configs", None)
-    learning_rate = learning_rate_override if learning_rate_override is not None else training_config.get("learning_rate")
-
-    if learning_rate is None and optimizer_configs is None:
-        learning_rate = 5e-5
+    learning_rate, optimizer_configs = resolve_training_optimizer_settings(
+        model_config=model_config,
+        learning_rate_override=learning_rate_override,
+    )
 
     return MelodyAwareDiffusionCondTrainingWrapper(
         model=model,

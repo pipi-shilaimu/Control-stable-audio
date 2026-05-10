@@ -29,7 +29,7 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
 
         self.assertEqual(args.model_name, "stabilityai/stable-audio-open-1.0")
         self.assertEqual(args.melody_feature, "cqt")
-        self.assertEqual(args.num_control_layers, 2)
+        self.assertEqual(args.num_control_layers, 12)
         self.assertEqual(args.control_id, "melody_control")
         self.assertEqual(args.cqt_backend, "auto")
         self.assertEqual(args.chroma_bins, 12)
@@ -49,6 +49,47 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         scheduler = InverseLR(optimizer, inv_gamma=10.0, power=0.5)
 
         self.assertEqual(len(scheduler.get_last_lr()), 1)
+
+    def test_learning_rate_override_updates_optimizer_config_without_mutating_model_config(self) -> None:
+        module = _load_script_module()
+        model_config = {
+            "training": {
+                "learning_rate": 5e-5,
+                "optimizer_configs": {
+                    "diffusion": {
+                        "optimizer": {
+                            "type": "AdamW",
+                            "config": {
+                                "lr": 5e-5,
+                                "betas": (0.9, 0.999),
+                            },
+                        },
+                        "scheduler": {
+                            "type": "InverseLR",
+                            "config": {
+                                "inv_gamma": 1_000_000,
+                            },
+                        },
+                    }
+                },
+            }
+        }
+
+        learning_rate, optimizer_configs = module.resolve_training_optimizer_settings(
+            model_config=model_config,
+            learning_rate_override=1e-4,
+        )
+
+        self.assertIsNone(learning_rate)
+        self.assertEqual(optimizer_configs["diffusion"]["optimizer"]["config"]["lr"], 1e-4)
+        self.assertEqual(
+            model_config["training"]["optimizer_configs"]["diffusion"]["optimizer"]["config"]["lr"],
+            5e-5,
+        )
+        self.assertEqual(
+            optimizer_configs["diffusion"]["scheduler"]["config"]["inv_gamma"],
+            1_000_000,
+        )
 
     def test_replaces_temp_metadata_function_with_importable_package_function(self) -> None:
         module = _load_script_module()
