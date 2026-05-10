@@ -76,6 +76,107 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
         self.assertEqual(args.output_dir, "outputs/controlnet_generation_random")
         self.assertEqual(args.melody_feature, "cqt")
 
+    def test_batch_script_parser_allows_reference_prompt_mode_without_common_prompt(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(["--ckpt-path", "model.ckpt"])
+
+        self.assertIsNone(args.prompt)
+        self.assertFalse(args.use_reference_prompt)
+
+    def test_loads_reference_prompt_from_sibling_manifest(self) -> None:
+        module = _load_batch_script_module()
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "train"
+            manifest_dir = root / "manifests"
+            train_dir.mkdir()
+            manifest_dir.mkdir()
+            audio_path = train_dir / "000001.wav"
+            audio_path.write_bytes(b"placeholder")
+            (manifest_dir / "train.json").write_text(
+                '{"000001.wav": {"prompt": "reference prompt from manifest"}}',
+                encoding="utf-8",
+            )
+
+            prompt = module.load_reference_prompt(audio_path)
+
+        self.assertEqual(prompt, "reference prompt from manifest")
+
+    def test_resolves_reference_prompt_when_common_prompt_is_missing(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "train"
+            manifest_dir = root / "manifests"
+            train_dir.mkdir()
+            manifest_dir.mkdir()
+            audio_path = train_dir / "000001.wav"
+            audio_path.write_bytes(b"placeholder")
+            (manifest_dir / "train.json").write_text(
+                '{"000001.wav": {"prompt": "per-reference prompt"}}',
+                encoding="utf-8",
+            )
+            args = parser.parse_args(["--ckpt-path", "model.ckpt"])
+
+            prompt, source = module.resolve_generation_prompt(args, audio_path)
+
+        self.assertEqual(prompt, "per-reference prompt")
+        self.assertEqual(source, "reference")
+
+    def test_reference_prompt_flag_overrides_common_prompt(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "train"
+            manifest_dir = root / "manifests"
+            train_dir.mkdir()
+            manifest_dir.mkdir()
+            audio_path = train_dir / "000001.wav"
+            audio_path.write_bytes(b"placeholder")
+            (manifest_dir / "train.json").write_text(
+                '{"000001.wav": {"prompt": "reference wins"}}',
+                encoding="utf-8",
+            )
+            args = parser.parse_args(
+                [
+                    "--ckpt-path",
+                    "model.ckpt",
+                    "--prompt",
+                    "common fallback",
+                    "--use-reference-prompt",
+                ]
+            )
+
+            prompt, source = module.resolve_generation_prompt(args, audio_path)
+
+        self.assertEqual(prompt, "reference wins")
+        self.assertEqual(source, "reference")
+
+    def test_common_prompt_is_used_when_reference_prompt_flag_is_not_set(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+        args = parser.parse_args(["--ckpt-path", "model.ckpt", "--prompt", "common prompt"])
+
+        prompt, source = module.resolve_generation_prompt(args, Path("missing.wav"))
+
+        self.assertEqual(prompt, "common prompt")
+        self.assertEqual(source, "argument")
+
+    def test_missing_reference_prompt_is_actionable_when_prompt_is_empty(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+        args = parser.parse_args(["--ckpt-path", "model.ckpt", "--prompt", ""])
+
+        with self.assertRaisesRegex(ValueError, "No prompt available"):
+            module.resolve_generation_prompt(args, Path("missing.wav"))
+
     def test_pretrained_model_loader_wraps_huggingface_t5_errors_with_actionable_context(self) -> None:
         module = _load_batch_script_module()
 

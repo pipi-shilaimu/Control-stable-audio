@@ -42,6 +42,9 @@ class RandomGenerationPlanItem(NamedTuple):
     seed: int
 
 
+_REFERENCE_PROMPT_MANIFEST_CACHE: dict[Path, dict[str, Any]] = {}
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate multiple ControlNet outputs from random reference audios and score melody similarity."
@@ -53,7 +56,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="stable_audio_control/data",
         help="Root directory scanned recursively for reference audio files.",
     )
-    parser.add_argument("--prompt", type=str, required=True, help="Text prompt for every generation.")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Fallback text prompt. If omitted or blank, each reference audio must provide a manifest prompt.",
+    )
+    parser.add_argument(
+        "--use-reference-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use each reference audio's manifest prompt instead of the shared --prompt.",
+    )
+    parser.add_argument(
+        "--reference-prompt-manifest",
+        type=str,
+        default=None,
+        help="Optional JSON manifest used to resolve reference prompts. Defaults to sibling manifests/<split>.json.",
+    )
     parser.add_argument("--negative-prompt", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default="outputs/controlnet_generation_random")
     parser.add_argument("--summary-name", type=str, default="summary.json")
@@ -138,10 +158,28 @@ def _conditioning(prompt: str, seconds_start: float, seconds_total: float) -> li
     ]
 
 
+def _normalized_optional_prompt(prompt: str | None) -> str | None:
+    if prompt is None:
+        return None
+    prompt = prompt.strip()
+    return prompt if prompt else None
+
+
+def _reference_prompt_mode_requested(args: argparse.Namespace) -> bool:
+    return bool(args.use_reference_prompt) or _normalized_optional_prompt(args.prompt) is None
+
+
 def _negative_conditioning(args: argparse.Namespace) -> list[dict[str, Any]] | None:
     if not args.negative_prompt:
         return None
     return _conditioning(args.negative_prompt, args.seconds_start, args.seconds_total)
+
+
+def _required_argument_prompt(args: argparse.Namespace) -> str:
+    prompt = _normalized_optional_prompt(args.prompt)
+    if prompt is None:
+        raise ValueError("No shared --prompt is available for this generation call.")
+    return prompt
 
 
 def _prepare_model(model: torch.nn.Module, *, device: torch.device, model_half: bool) -> torch.nn.Module:
@@ -172,7 +210,7 @@ def _generate(
         cfg_scale=float(args.cfg_scale),
         conditioning=None
         if conditioning_tensors is not None
-        else _conditioning(args.prompt, args.seconds_start, args.seconds_total),
+        else _conditioning(_required_argument_prompt(args), args.seconds_start, args.seconds_total),
         conditioning_tensors=conditioning_tensors,
         negative_conditioning=_negative_conditioning(args),
         batch_size=1,
@@ -207,6 +245,88 @@ def find_audio_files(root: str | Path, *, extensions: tuple[str, ...] = SUPPORTE
         if path.is_file() and path.suffix.lower() in normalized_extensions
     ]
     return sorted(files, key=lambda path: path.resolve().as_posix().lower())
+
+
+def _candidate_reference_prompt_manifests(
+    audio_path: str | Path,
+    *,
+    manifest_path: str | Path | None = None,
+) -> list[Path]:
+    if manifest_path is not None:
+        return [Path(manifest_path)]
+
+    audio_path = Path(audio_path)
+    split_dir = audio_path.parent
+    return [split_dir.parent / "manifests" / f"{split_dir.name}.json"]
+
+
+def _load_reference_prompt_manifest(path: str | Path) -> dict[str, Any]:
+    resolved = Path(path).resolve()
+    if resolved not in _REFERENCE_PROMPT_MANIFEST_CACHE:
+        _REFERENCE_PROMPT_MANIFEST_CACHE[resolved] = json.loads(resolved.read_text(encoding="utf-8"))
+    return _REFERENCE_PROMPT_MANIFEST_CACHE[resolved]
+
+
+def _reference_prompt_manifest_keys(audio_path: str | Path, manifest_path: str | Path) -> list[str]:
+    audio_path = Path(audio_path)
+    manifest_path = Path(manifest_path)
+    keys = [audio_path.name]
+
+    for root in (audio_path.parent, audio_path.parent.parent, manifest_path.parent.parent):
+        try:
+            keys.append(audio_path.relative_to(root).as_posix())
+        except ValueError:
+            continue
+
+    deduped: list[str] = []
+    for key in keys:
+        normalized = key.replace("\\", "/").lstrip("./")
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+def load_reference_prompt(
+    audio_path: str | Path,
+    *,
+    manifest_path: str | Path | None = None,
+) -> str | None:
+    for candidate in _candidate_reference_prompt_manifests(audio_path, manifest_path=manifest_path):
+        if not candidate.exists():
+            continue
+
+        manifest = _load_reference_prompt_manifest(candidate)
+        for key in _reference_prompt_manifest_keys(audio_path, candidate):
+            entry = manifest.get(key)
+            if entry is None:
+                continue
+
+            prompt = entry.get("prompt") if isinstance(entry, dict) else str(entry)
+            prompt = _normalized_optional_prompt(prompt)
+            if prompt is not None:
+                return prompt
+
+    return None
+
+
+def resolve_generation_prompt(args: argparse.Namespace, reference_audio_path: str | Path) -> tuple[str, str]:
+    if _reference_prompt_mode_requested(args):
+        prompt = load_reference_prompt(
+            reference_audio_path,
+            manifest_path=getattr(args, "reference_prompt_manifest", None),
+        )
+        if prompt is not None:
+            return prompt, "reference"
+
+    argument_prompt = _normalized_optional_prompt(args.prompt)
+    if argument_prompt is not None and not bool(args.use_reference_prompt):
+        return argument_prompt, "argument"
+
+    raise ValueError(
+        "No prompt available for reference audio "
+        f"{Path(reference_audio_path)}. Provide --prompt, or make sure the audio has a manifest entry with "
+        "`prompt` in a sibling manifests/<split>.json file, or pass --reference-prompt-manifest."
+    )
 
 
 def build_random_generation_plan(
@@ -431,6 +551,10 @@ def main() -> None:
         seed_max=int(args.seed_max),
         allow_reference_reuse=bool(args.allow_reference_reuse),
     )
+    prompt_plan = {
+        item.index: resolve_generation_prompt(args, item.reference_audio_path)
+        for item in plan
+    }
 
     control_model, sample_rate, use_ema, control_channels = _build_control_model(args, device=device)
     sample_size = (
@@ -447,6 +571,10 @@ def main() -> None:
     print(f"reference_root={Path(args.reference_root).resolve()}")
     print(f"selected_references={len(plan)}")
     print(f"melody_feature={args.melody_feature}, control_channels={control_channels}")
+    print(
+        "prompt_mode="
+        f"{'reference' if _reference_prompt_mode_requested(args) else 'argument'}"
+    )
 
     extractor = build_melody_extractor(
         feature=args.melody_feature,
@@ -475,10 +603,11 @@ def main() -> None:
         reference_output_path = item_dir / args.reference_output_name
         control_output_path = item_dir / args.control_output_name
         similarity_output_path = item_dir / args.similarity_name
+        item_prompt, item_prompt_source = prompt_plan[item.index]
 
         print(
             f"[{item.index + 1}/{len(plan)}] reference={item.reference_audio_path.name} "
-            f"seed={item.seed} -> {item_dir}"
+            f"seed={item.seed} prompt_source={item_prompt_source} -> {item_dir}"
         )
 
         reference_audio = load_reference_audio(
@@ -500,7 +629,7 @@ def main() -> None:
             raise RuntimeError("Failed to build control_input from reference audio.")
 
         conditioning_tensors = control_model.conditioner(
-            _conditioning(args.prompt, args.seconds_start, args.seconds_total),
+            _conditioning(item_prompt, args.seconds_start, args.seconds_total),
             device,
         )
 
@@ -541,6 +670,8 @@ def main() -> None:
                 "reference_audio_output": str(reference_output_path.resolve()),
                 "control_output": str(control_output_path.resolve()),
                 "similarity_output": str(similarity_output_path.resolve()),
+                "prompt": item_prompt,
+                "prompt_source": item_prompt_source,
                 "similarity": similarity["similarity"],
                 "feature": similarity["feature"],
                 "alignment": similarity["alignment"],
@@ -560,6 +691,12 @@ def main() -> None:
     summary = {
         "schema_version": 1,
         "model_name": args.model_name,
+        "prompt": {
+            "argument": _normalized_optional_prompt(args.prompt),
+            "mode": "reference" if _reference_prompt_mode_requested(args) else "argument",
+            "reference_prompt_manifest": args.reference_prompt_manifest,
+            "use_reference_prompt": bool(args.use_reference_prompt),
+        },
         "paths": {
             "checkpoint": str(Path(args.ckpt_path).resolve()),
             "reference_root": str(Path(args.reference_root).resolve()),
