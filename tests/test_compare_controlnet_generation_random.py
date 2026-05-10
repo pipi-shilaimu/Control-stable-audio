@@ -76,6 +76,32 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
         self.assertEqual(args.output_dir, "outputs/controlnet_generation_random")
         self.assertEqual(args.melody_feature, "cqt")
 
+    def test_pretrained_model_loader_wraps_huggingface_t5_errors_with_actionable_context(self) -> None:
+        module = _load_batch_script_module()
+
+        def failing_loader(model_name: str):
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+
+        with self.assertRaisesRegex(RuntimeError, "T5 tokenizer/encoder"):
+            module.load_pretrained_model_with_context(
+                "stabilityai/stable-audio-open-1.0",
+                loader=failing_loader,
+            )
+
+        try:
+            module.load_pretrained_model_with_context(
+                "stabilityai/stable-audio-open-1.0",
+                loader=failing_loader,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            self.assertIn("t5-base", message)
+            self.assertIn("HF_HOME", message)
+            self.assertIn("get_pretrained_model", message)
+            self.assertIn("stabilityai/stable-audio-open-1.0", message)
+        else:
+            self.fail("Expected RuntimeError")
+
 
 if __name__ == "__main__":
     unittest.main()

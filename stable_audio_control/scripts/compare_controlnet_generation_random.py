@@ -6,7 +6,7 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, Callable, NamedTuple, cast
 
 import torch
 
@@ -248,13 +248,39 @@ def build_random_generation_plan(
     ]
 
 
+def load_pretrained_model_with_context(
+    model_name: str,
+    *,
+    loader: Callable[[str], tuple[torch.nn.Module, dict[str, Any]]] = get_pretrained_model,
+) -> tuple[torch.nn.Module, dict[str, Any]]:
+    try:
+        return loader(model_name)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Failed to load the pretrained StableAudio model via "
+            f"get_pretrained_model({model_name!r}). The failure happened while "
+            "stable-audio-tools was building the text conditioner, which loads a "
+            "T5 tokenizer/encoder through Hugging Face. This usually means the "
+            "container cannot download Hugging Face files, or the HF cache is incomplete/corrupt.\n\n"
+            "Try pre-caching the required assets inside the same container/environment before rerunning:\n"
+            "  export HF_HOME=/outputs/hf_cache\n"
+            "  python3 -c \"from transformers import AutoTokenizer, T5EncoderModel; "
+            "AutoTokenizer.from_pretrained('t5-base'); "
+            "T5EncoderModel.from_pretrained('t5-base'); "
+            "from stable_audio_tools import get_pretrained_model; "
+            f"get_pretrained_model('{model_name}')\"\n\n"
+            "If the container is offline, populate HF_HOME from a connected environment first, then rerun "
+            "with HF_HOME pointing at that cache."
+        ) from exc
+
+
 def _build_control_model(
     args: argparse.Namespace,
     *,
     device: torch.device,
 ) -> tuple[ControlConditionedDiffusionWrapper, int, bool, int]:
     print(f"loading base model: {args.model_name}")
-    base_model, model_config = get_pretrained_model(args.model_name)
+    base_model, model_config = load_pretrained_model_with_context(args.model_name)
     base_model = cast(ConditionedDiffusionModelWrapper, base_model)
 
     sample_rate = int(model_config["sample_rate"])
