@@ -18,9 +18,9 @@ model = model.to(device)
 
 # Set up text and timing conditioning
 conditioning = [{
-    "prompt": "Lofi,study,chill,relaxed,lazybass, slow anafternoon,ambient, drum and Smooth, 60 BPM",
+    "prompt": "Electronic music that has a constant melody throughout with accompanying instruments used to supplement the melody which can be heard in possibly a casual setting",
     "seconds_start": 0,
-    "seconds_total": 60
+    "seconds_total": 20
 }]
 
 # Generate stereo audio

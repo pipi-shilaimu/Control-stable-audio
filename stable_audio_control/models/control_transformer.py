@@ -188,7 +188,7 @@ class ControlNetContinuousTransformer(nn.Module):
             )
 
         # 控制流从与主干同构的表示出发，再叠加外部控制信号。
-        x_ctrl = x_base + ctrl * control_scale
+        x_ctrl = x_base + ctrl
 
         # 层循环：前 N 层执行“控制支路 + 主干支路 + zero_linear 注入”，其余层仅走主干。
         for layer_ix, base_layer in enumerate(self.base.layers):
@@ -232,7 +232,9 @@ class ControlNetContinuousTransformer(nn.Module):
                     )
 
                 # 把控制分支输出经过零初始化映射后注入主干。
-                x_base = x_base + self.zero_linears[layer_ix](x_ctrl)
+                # `control_scale=0` must fully disable the trained residual branch,
+                # returning the frozen base transformer path.
+                x_base = x_base + self.zero_linears[layer_ix](x_ctrl) * control_scale
             else:
                 if use_checkpointing:
                     x_base = torch.utils.checkpoint.checkpoint(
