@@ -58,6 +58,25 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
         self.assertTrue(all(10 <= item.seed <= 99 for item in plan))
         self.assertEqual([item.index for item in plan], [0, 1, 2])
 
+    def test_build_random_generation_plan_can_reuse_one_fixed_generation_seed(self) -> None:
+        module = _load_batch_script_module()
+        audio_paths = [Path(f"ref_{ix}.wav") for ix in range(5)]
+
+        plan = module.build_random_generation_plan(
+            audio_paths,
+            num_samples=3,
+            random_seed=123,
+            seed_min=10,
+            seed_max=11,
+            allow_reference_reuse=False,
+            fixed_seed=777,
+        )
+
+        self.assertEqual(len(plan), 3)
+        self.assertEqual(len({item.reference_audio_path for item in plan}), 3)
+        self.assertEqual([item.seed for item in plan], [777, 777, 777])
+        self.assertEqual([item.index for item in plan], [0, 1, 2])
+
     def test_batch_script_parser_defaults_to_ten_samples_from_data_root(self) -> None:
         module = _load_batch_script_module()
         parser = module.build_arg_parser()
@@ -84,6 +103,21 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
 
         self.assertIsNone(args.prompt)
         self.assertFalse(args.use_reference_prompt)
+
+    def test_batch_script_parser_accepts_fixed_seed_for_all_generated_samples(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(
+            [
+                "--ckpt-path",
+                "model.ckpt",
+                "--fixed-seed",
+                "12345",
+            ]
+        )
+
+        self.assertEqual(args.fixed_seed, 12345)
 
     def test_loads_reference_prompt_from_sibling_manifest(self) -> None:
         module = _load_batch_script_module()

@@ -18,9 +18,9 @@ model = model.to(device)
 
 # Set up text and timing conditioning
 conditioning = [{
-    "prompt": "Electronic music that has a constant melody throughout with accompanying instruments used to supplement the melody which can be heard in possibly a casual setting",
+    "prompt": "Warm arpeggios on an analog synthesizer with a gradually rising filter cutoff and a reverb tail",
     "seconds_start": 0,
-    "seconds_total": 20
+    "seconds_total": 47
 }]
 
 # Generate stereo audio
@@ -28,14 +28,14 @@ my_seed = random.randint(0, 2**31 - 1)
 output = generate_diffusion_cond(
     model,
     steps=100,
-    cfg_scale=7,
+    cfg_scale=5,
     conditioning=conditioning,
     sample_size=sample_size,
     sigma_min=0.3,
     sigma_max=500,
     sampler_type="dpmpp-3m-sde",
     device=device,
-    seed=my_seed
+    seed=12345
 )
 
 # Rearrange audio batch to a single sequence

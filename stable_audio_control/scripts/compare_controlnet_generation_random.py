@@ -83,6 +83,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--model-name", type=str, default="stabilityai/stable-audio-open-1.0")
     parser.add_argument("--random-seed", type=int, default=0, help="Controls both reference sampling and generated seeds.")
+    parser.add_argument(
+        "--fixed-seed",
+        type=int,
+        default=None,
+        help="If set, use the same generation seed for every sample while --random-seed still selects references.",
+    )
     parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument("--seed-min", type=int, default=0)
     parser.add_argument("--seed-max", type=int, default=2**31 - 1)
@@ -337,22 +343,15 @@ def build_random_generation_plan(
     seed_min: int,
     seed_max: int,
     allow_reference_reuse: bool,
+    fixed_seed: int | None = None,
 ) -> list[RandomGenerationPlanItem]:
     if num_samples < 1:
         raise ValueError("num_samples must be greater than 0.")
-    if seed_max < seed_min:
-        raise ValueError("seed_max must be greater than or equal to seed_min.")
     if not audio_paths:
         raise ValueError("No audio files were found under the reference root.")
     if not allow_reference_reuse and num_samples > len(audio_paths):
         raise ValueError(
             f"Requested {num_samples} samples but only {len(audio_paths)} unique audio files are available."
-        )
-
-    seed_space_size = int(seed_max) - int(seed_min) + 1
-    if seed_space_size < num_samples:
-        raise ValueError(
-            f"Seed range [{seed_min}, {seed_max}] is too small for {num_samples} unique seeds."
         )
 
     rng = random.Random(int(random_seed))
@@ -361,7 +360,19 @@ def build_random_generation_plan(
         if allow_reference_reuse
         else rng.sample(audio_paths, k=num_samples)
     )
-    selected_seeds = rng.sample(range(int(seed_min), int(seed_max) + 1), k=num_samples)
+    if fixed_seed is not None:
+        selected_seeds = [int(fixed_seed)] * num_samples
+    else:
+        if seed_max < seed_min:
+            raise ValueError("seed_max must be greater than or equal to seed_min.")
+
+        seed_space_size = int(seed_max) - int(seed_min) + 1
+        if seed_space_size < num_samples:
+            raise ValueError(
+                f"Seed range [{seed_min}, {seed_max}] is too small for {num_samples} unique seeds."
+            )
+
+        selected_seeds = rng.sample(range(int(seed_min), int(seed_max) + 1), k=num_samples)
     return [
         RandomGenerationPlanItem(index=index, reference_audio_path=reference_path, seed=seed)
         for index, (reference_path, seed) in enumerate(zip(selected_audio_paths, selected_seeds))
@@ -550,6 +561,7 @@ def main() -> None:
         seed_min=int(args.seed_min),
         seed_max=int(args.seed_max),
         allow_reference_reuse=bool(args.allow_reference_reuse),
+        fixed_seed=args.fixed_seed,
     )
     prompt_plan = {
         item.index: resolve_generation_prompt(args, item.reference_audio_path)
@@ -570,6 +582,8 @@ def main() -> None:
     print(f"sample_rate={sample_rate}, sample_size={sample_size}, seconds_total={args.seconds_total}")
     print(f"reference_root={Path(args.reference_root).resolve()}")
     print(f"selected_references={len(plan)}")
+    if args.fixed_seed is not None:
+        print(f"fixed_seed={int(args.fixed_seed)}")
     print(f"melody_feature={args.melody_feature}, control_channels={control_channels}")
     print(
         "prompt_mode="
@@ -718,7 +732,8 @@ def main() -> None:
             "sampler_type": args.sampler_type,
             "sigma_min": float(args.sigma_min),
             "sigma_max": float(args.sigma_max),
-            "seed_policy": "random_unique",
+            "seed_policy": "fixed" if args.fixed_seed is not None else "random_unique",
+            "fixed_seed": None if args.fixed_seed is None else int(args.fixed_seed),
         },
         "control": {
             "scale": float(args.control_scale),
