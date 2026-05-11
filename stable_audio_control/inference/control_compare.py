@@ -37,6 +37,29 @@ def strip_state_dict_prefix(
     return {key[len(prefix) :]: value for key, value in state_dict.items() if key.startswith(prefix)}
 
 
+def remap_training_melody_augmenter_keys(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Make training-time MelodyControlAugmenter conditioner keys loadable at inference time.
+
+    During training, the original Stable Audio conditioner is wrapped under
+    `base_wrapper.conditioner.base_conditioner`. At inference we build the
+    wrapper without that training-only augmenter, so those weights live under
+    `base_wrapper.conditioner`.
+    """
+
+    training_prefix = "base_wrapper.conditioner.base_conditioner."
+    inference_prefix = "base_wrapper.conditioner."
+    remapped = dict(state_dict)
+    for key, value in state_dict.items():
+        if not key.startswith(training_prefix):
+            continue
+        inference_key = inference_prefix + key[len(training_prefix) :]
+        remapped.setdefault(inference_key, value)
+        remapped.pop(key, None)
+    return remapped
+
+
 def extract_control_checkpoint_state_dicts(
     checkpoint: Mapping[str, Any],
     *,
@@ -49,7 +72,9 @@ def extract_control_checkpoint_state_dicts(
         raise TypeError("Checkpoint must be a state dict or contain a mapping under 'state_dict'.")
 
     state_dict = dict(raw_state)
-    online_wrapper_state = strip_state_dict_prefix(state_dict, "diffusion.")
+    online_wrapper_state = remap_training_melody_augmenter_keys(
+        strip_state_dict_prefix(state_dict, "diffusion.")
+    )
     if not online_wrapper_state:
         raise ValueError("Checkpoint does not contain any 'diffusion.' weights.")
 

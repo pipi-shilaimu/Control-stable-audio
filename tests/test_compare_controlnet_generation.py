@@ -65,6 +65,38 @@ class ControlNetGenerationCompareTests(unittest.TestCase):
         self.assertEqual(states.ema_model_state, {})
         self.assertFalse(states.use_ema)
 
+    def test_extract_remaps_training_melody_augmenter_base_conditioner_keys_for_inference(self) -> None:
+        augmented_conditioner_value = torch.tensor([3.0])
+        canonical_conditioner_value = torch.tensor([4.0])
+        checkpoint = {
+            "state_dict": {
+                "diffusion.base_wrapper.conditioner.base_conditioner.conditioners.seconds_total.embedder.embedding.1.weight": augmented_conditioner_value,
+                "diffusion.base_wrapper.conditioner.conditioners.prompt.embedder.weight": canonical_conditioner_value,
+                "diffusion.control_projector.weight": torch.tensor([5.0]),
+            }
+        }
+
+        states = extract_control_checkpoint_state_dicts(checkpoint, prefer_ema=True)
+
+        self.assertIn(
+            "base_wrapper.conditioner.conditioners.seconds_total.embedder.embedding.1.weight",
+            states.online_wrapper_state,
+        )
+        self.assertNotIn(
+            "base_wrapper.conditioner.base_conditioner.conditioners.seconds_total.embedder.embedding.1.weight",
+            states.online_wrapper_state,
+        )
+        torch.testing.assert_close(
+            states.online_wrapper_state[
+                "base_wrapper.conditioner.conditioners.seconds_total.embedder.embedding.1.weight"
+            ],
+            augmented_conditioner_value,
+        )
+        torch.testing.assert_close(
+            states.online_wrapper_state["base_wrapper.conditioner.conditioners.prompt.embedder.weight"],
+            canonical_conditioner_value,
+        )
+
     def test_writes_compare_metadata_sidecar(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
