@@ -133,6 +133,21 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
 
         self.assertTrue(args.compare_base)
 
+    def test_batch_script_parser_can_compare_same_control_model_with_bypassed_control_input(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(
+            [
+                "--ckpt-path",
+                "model.ckpt",
+                "--compare-control-bypass",
+            ]
+        )
+
+        self.assertTrue(args.compare_control_bypass)
+        self.assertEqual(args.control_bypass_output_name, "control_bypass.wav")
+
     def test_loads_reference_prompt_from_sibling_manifest(self) -> None:
         module = _load_batch_script_module()
 

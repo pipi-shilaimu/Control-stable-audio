@@ -80,6 +80,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-name", type=str, default="summary.json")
     parser.add_argument("--reference-output-name", type=str, default="reference.wav")
     parser.add_argument("--control-output-name", type=str, default="control.wav")
+    parser.add_argument("--control-bypass-output-name", type=str, default="control_bypass.wav")
     parser.add_argument("--similarity-name", type=str, default="similarity.json")
 
     parser.add_argument("--model-name", type=str, default="stabilityai/stable-audio-open-1.0")
@@ -94,6 +95,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--compare-base",
         action="store_true",
         help="Also generate a pure base reference for each sample and print waveform diff against the control output.",
+    )
+    parser.add_argument(
+        "--compare-control-bypass",
+        action="store_true",
+        help=(
+            "Also generate with the same loaded ControlNet model but without passing control_input/control_scale. "
+            "When --control-scale 0 is transparent, this should match the control output closely."
+        ),
     )
     parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument("--seed-min", type=int, default=0)
@@ -644,6 +653,7 @@ def main() -> None:
 
         reference_output_path = item_dir / args.reference_output_name
         control_output_path = item_dir / args.control_output_name
+        control_bypass_output_path = item_dir / args.control_bypass_output_name
         similarity_output_path = item_dir / args.similarity_name
         item_prompt, item_prompt_source = prompt_plan[item.index]
 
@@ -688,6 +698,29 @@ def main() -> None:
             },
         )
         save_audio_tensor(control_output_path, control_audio, sample_rate)
+
+        control_bypass_audio_difference = None
+        control_bypass_output_resolved = None
+        if args.compare_control_bypass:
+            control_bypass_audio = _generate(
+                control_model,
+                args,
+                seed=int(item.seed),
+                sample_size=sample_size,
+                device=device,
+                conditioning_tensors=conditioning_tensors,
+            )
+            save_audio_tensor(control_bypass_output_path, control_bypass_audio, sample_rate)
+            control_bypass_output_resolved = str(control_bypass_output_path.resolve())
+            control_bypass_audio_difference = compute_audio_difference_stats(control_bypass_audio, control_audio)
+            print(
+                "control_bypass_vs_control_audio_difference "
+                f"max_abs={control_bypass_audio_difference['max_abs_diff']:.6f} "
+                f"mean_abs={control_bypass_audio_difference['mean_abs_diff']:.6f} "
+                f"rms={control_bypass_audio_difference['rms_diff']:.6f} "
+                f"relative_rms={control_bypass_audio_difference['relative_rms_diff']:.6f} "
+                f"corr={control_bypass_audio_difference['channel_correlation']}"
+            )
 
         audio_difference = None
         if base_model is not None:
@@ -735,6 +768,7 @@ def main() -> None:
                 "reference_audio_source": str(item.reference_audio_path.resolve()),
                 "reference_audio_output": str(reference_output_path.resolve()),
                 "control_output": str(control_output_path.resolve()),
+                "control_bypass_output": control_bypass_output_resolved,
                 "similarity_output": str(similarity_output_path.resolve()),
                 "prompt": item_prompt,
                 "prompt_source": item_prompt_source,
@@ -744,6 +778,8 @@ def main() -> None:
                 "reference_melody_control_shape": list(melody_control.shape),
                 "control_input_shape": list(control_input.shape),
                 "audio_difference": audio_difference,
+                "base_vs_control_audio_difference": audio_difference,
+                "control_bypass_vs_control_audio_difference": control_bypass_audio_difference,
             }
         )
 
@@ -752,6 +788,8 @@ def main() -> None:
         del control_input
         del conditioning_tensors
         del control_audio
+        if args.compare_control_bypass:
+            del control_bypass_audio
         if base_model is not None:
             del base_conditioning_tensors
             del base_audio
@@ -791,6 +829,7 @@ def main() -> None:
             "seed_policy": "fixed" if args.fixed_seed is not None else "random_unique",
             "fixed_seed": None if args.fixed_seed is None else int(args.fixed_seed),
             "compare_base": bool(args.compare_base),
+            "compare_control_bypass": bool(args.compare_control_bypass),
         },
         "control": {
             "scale": float(args.control_scale),
