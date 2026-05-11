@@ -1,49 +1,89 @@
+from __future__ import annotations
 
-import soundfile as sf
+from pathlib import Path
+
 import torch
-import torchaudio
-from einops import rearrange
+
+from stable_audio_control.inference.control_compare import audio_sample_size_from_seconds, save_audio_tensor
 from stable_audio_tools import get_pretrained_model
 from stable_audio_tools.inference.generation import generate_diffusion_cond
-import random
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Download model
-model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0")
-sample_rate = model_config["sample_rate"]
-sample_size = model_config["sample_size"]
+MODEL_NAME = "stabilityai/stable-audio-open-1.0"
+PROMPT = "Warm arpeggios on an analog synthesizer with a gradually rising filter cutoff and a reverb tail"
+SECONDS_START = 0.0
+SECONDS_TOTAL = 47.0
+STEPS = 100
+CFG_SCALE = 5.0
+SAMPLER_TYPE = "dpmpp-3m-sde"
+SIGMA_MIN = 0.3
+SIGMA_MAX = 500.0
+SEED = 12345
+MODEL_HALF = True
+OUTPUT_PATH = Path("output.wav")
 
-model = model.to(device)
 
-# Set up text and timing conditioning
-conditioning = [{
-    "prompt": "Warm arpeggios on an analog synthesizer with a gradually rising filter cutoff and a reverb tail",
-    "seconds_start": 0,
-    "seconds_total": 47
-}]
+def _resolve_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Generate stereo audio
-my_seed = random.randint(0, 2**31 - 1)
-output = generate_diffusion_cond(
-    model,
-    steps=100,
-    cfg_scale=5,
-    conditioning=conditioning,
-    sample_size=sample_size,
-    sigma_min=0.3,
-    sigma_max=500,
-    sampler_type="dpmpp-3m-sde",
-    device=device,
-    seed=12345
-)
 
-# Rearrange audio batch to a single sequence
-output = rearrange(output, "b d n -> d (b n)")
+def _prepare_model(model: torch.nn.Module, *, device: torch.device, model_half: bool) -> torch.nn.Module:
+    model = model.to(device).eval().requires_grad_(False)
+    if model_half:
+        if device.type == "cpu":
+            print("model_half requested on CPU; keeping float32.")
+        else:
+            model = model.to(torch.float16)
+    return model
 
-# Peak normalize, clip, convert to int16, and save to file
-output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-#torchaudio.save("output.wav", output, sample_rate,backend="soundfile")
-audio_data = output.squeeze().cpu().numpy().T
-sf.write("output.wav", audio_data, sample_rate)
-print("音频已成功保存为 output.wav")
+
+def _conditioning(prompt: str, seconds_start: float, seconds_total: float) -> list[dict[str, float | str]]:
+    return [
+        {
+            "prompt": prompt,
+            "seconds_start": float(seconds_start),
+            "seconds_total": float(seconds_total),
+        }
+    ]
+
+
+def _resolve_sample_size(*, sample_rate: int, min_input_length: int) -> int:
+    return audio_sample_size_from_seconds(
+        seconds_total=float(SECONDS_TOTAL),
+        sample_rate=int(sample_rate),
+        min_input_length=int(min_input_length),
+    )
+
+
+def main() -> int:
+    device = _resolve_device()
+    print(f"device={device}")
+
+    model, model_config = get_pretrained_model(MODEL_NAME)
+    sample_rate = int(model_config["sample_rate"])
+    sample_size = _resolve_sample_size(sample_rate=sample_rate, min_input_length=int(model.min_input_length))
+    print(f"sample_rate={sample_rate}, sample_size={sample_size}, seconds_total={SECONDS_TOTAL}")
+
+    model = _prepare_model(model, device=device, model_half=MODEL_HALF)
+
+    conditioning = _conditioning(PROMPT, SECONDS_START, SECONDS_TOTAL)
+    output = generate_diffusion_cond(
+        model,
+        steps=STEPS,
+        cfg_scale=CFG_SCALE,
+        conditioning=conditioning,
+        sample_size=sample_size,
+        sigma_min=SIGMA_MIN,
+        sigma_max=SIGMA_MAX,
+        sampler_type=SAMPLER_TYPE,
+        device=device,
+        seed=SEED,
+    )
+
+    save_audio_tensor(OUTPUT_PATH, output, sample_rate)
+    print(f"音频已成功保存为 {OUTPUT_PATH}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

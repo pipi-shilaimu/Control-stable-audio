@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from stable_audio_control.audio_io import install_torchaudio_load_fallback  # noqa: E402
 from stable_audio_control.inference.control_compare import (  # noqa: E402
     audio_sample_size_from_seconds,
+    compute_audio_difference_stats,
     initialize_lazy_control_modules,
     load_control_checkpoint,
     load_reference_audio,
@@ -88,6 +89,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="If set, use the same generation seed for every sample while --random-seed still selects references.",
+    )
+    parser.add_argument(
+        "--compare-base",
+        action="store_true",
+        help="Also generate a pure base reference for each sample and print waveform diff against the control output.",
     )
     parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument("--seed-min", type=int, default=0)
@@ -452,6 +458,18 @@ def _build_control_model(
     return control_model, sample_rate, bool(checkpoint_load["use_ema"]), control_channels
 
 
+def _build_base_model(
+    args: argparse.Namespace,
+    *,
+    device: torch.device,
+) -> tuple[torch.nn.Module, int]:
+    print(f"loading base model for comparison: {args.model_name}")
+    base_model, model_config = load_pretrained_model_with_context(args.model_name)
+    sample_rate = int(model_config["sample_rate"])
+    base_model = cast(ConditionedDiffusionModelWrapper, _prepare_model(base_model, device=device, model_half=args.model_half))
+    return base_model, sample_rate
+
+
 def _build_similarity_kwargs(args: argparse.Namespace, *, sample_rate: int, sample_size: int) -> dict[str, Any]:
     return {
         "feature": args.melody_feature,
@@ -584,6 +602,8 @@ def main() -> None:
     print(f"selected_references={len(plan)}")
     if args.fixed_seed is not None:
         print(f"fixed_seed={int(args.fixed_seed)}")
+    if args.compare_base:
+        print("compare_base=True")
     print(f"melody_feature={args.melody_feature}, control_channels={control_channels}")
     print(
         "prompt_mode="
@@ -607,6 +627,14 @@ def main() -> None:
     latent_sample_size = sample_size
     if control_model.pretransform is not None:
         latent_sample_size = sample_size // int(control_model.pretransform.downsampling_ratio)
+
+    base_model = None
+    if args.compare_base:
+        base_model, _base_sample_rate = _build_base_model(args, device=device)
+        if int(_base_sample_rate) != int(sample_rate):
+            raise RuntimeError(
+                f"Base model sample_rate {_base_sample_rate} does not match control model sample_rate {sample_rate}."
+            )
 
     items: list[dict[str, Any]] = []
     for item in plan:
@@ -661,6 +689,30 @@ def main() -> None:
         )
         save_audio_tensor(control_output_path, control_audio, sample_rate)
 
+        audio_difference = None
+        if base_model is not None:
+            base_conditioning_tensors = base_model.conditioner(
+                _conditioning(item_prompt, args.seconds_start, args.seconds_total),
+                device,
+            )
+            base_audio = _generate(
+                base_model,
+                args,
+                seed=int(item.seed),
+                sample_size=sample_size,
+                device=device,
+                conditioning_tensors=base_conditioning_tensors,
+            )
+            audio_difference = compute_audio_difference_stats(base_audio, control_audio)
+            print(
+                "base_vs_control_audio_difference "
+                f"max_abs={audio_difference['max_abs_diff']:.6f} "
+                f"mean_abs={audio_difference['mean_abs_diff']:.6f} "
+                f"rms={audio_difference['rms_diff']:.6f} "
+                f"relative_rms={audio_difference['relative_rms_diff']:.6f} "
+                f"corr={audio_difference['channel_correlation']}"
+            )
+
         similarity = compare_audio_melody_similarity(
             reference_output_path,
             control_output_path,
@@ -691,6 +743,7 @@ def main() -> None:
                 "alignment": similarity["alignment"],
                 "reference_melody_control_shape": list(melody_control.shape),
                 "control_input_shape": list(control_input.shape),
+                "audio_difference": audio_difference,
             }
         )
 
@@ -699,6 +752,9 @@ def main() -> None:
         del control_input
         del conditioning_tensors
         del control_audio
+        if base_model is not None:
+            del base_conditioning_tensors
+            del base_audio
         _empty_cuda_cache()
 
     aggregate = _summarize_scores(items)
@@ -734,6 +790,7 @@ def main() -> None:
             "sigma_max": float(args.sigma_max),
             "seed_policy": "fixed" if args.fixed_seed is not None else "random_unique",
             "fixed_seed": None if args.fixed_seed is None else int(args.fixed_seed),
+            "compare_base": bool(args.compare_base),
         },
         "control": {
             "scale": float(args.control_scale),

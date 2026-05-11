@@ -119,6 +119,20 @@ class RandomControlNetGenerationCompareTests(unittest.TestCase):
 
         self.assertEqual(args.fixed_seed, 12345)
 
+    def test_batch_script_parser_can_compare_against_pure_base_generation(self) -> None:
+        module = _load_batch_script_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(
+            [
+                "--ckpt-path",
+                "model.ckpt",
+                "--compare-base",
+            ]
+        )
+
+        self.assertTrue(args.compare_base)
+
     def test_loads_reference_prompt_from_sibling_manifest(self) -> None:
         module = _load_batch_script_module()
 
