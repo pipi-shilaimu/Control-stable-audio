@@ -15,6 +15,7 @@ from stable_audio_control.audio_io import install_torchaudio_load_fallback  # no
 from stable_audio_control.inference.control_compare import (  # noqa: E402
     audio_sample_size_from_seconds,
     build_compare_metadata,
+    compute_audio_difference_stats,
     initialize_lazy_control_modules,
     load_control_checkpoint,
     load_reference_audio,
@@ -201,7 +202,8 @@ def main() -> None:
     base_model = cast(ConditionedDiffusionModelWrapper, _prepare_model(base_model, device=device, model_half=args.model_half))
     print(f"generating base output -> {base_output_path}")
     base_audio = _generate(base_model, args, sample_size=sample_size, device=device)
-    save_audio_tensor(base_output_path, base_audio, sample_rate)
+    base_audio_for_compare = base_audio.detach().to(torch.float32).cpu()
+    save_audio_tensor(base_output_path, base_audio_for_compare, sample_rate)
     del base_audio
     del base_model
     _empty_cuda_cache()
@@ -297,6 +299,15 @@ def main() -> None:
         },
     )
     save_audio_tensor(control_output_path, control_audio, sample_rate)
+    audio_difference = compute_audio_difference_stats(base_audio_for_compare, control_audio)
+    print(
+        "audio_difference "
+        f"max_abs={audio_difference['max_abs_diff']:.6f} "
+        f"mean_abs={audio_difference['mean_abs_diff']:.6f} "
+        f"rms={audio_difference['rms_diff']:.6f} "
+        f"relative_rms={audio_difference['relative_rms_diff']:.6f} "
+        f"corr={audio_difference['channel_correlation']}"
+    )
 
     control_config = {
         "melody_feature": args.melody_feature,
@@ -343,6 +354,7 @@ def main() -> None:
         "melody_control_shape": list(melody_control.shape),
         "control_input_shape": list(control_input.shape),
     }
+    metadata["audio_difference"] = audio_difference
     write_compare_metadata(metadata_path, metadata)
     print(f"metadata -> {metadata_path}")
 

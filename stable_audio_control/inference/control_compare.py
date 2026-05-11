@@ -175,9 +175,7 @@ def audio_sample_size_from_seconds(
     return sample_size
 
 
-def save_audio_tensor(path: str | Path, audio: torch.Tensor, sample_rate: int) -> None:
-    """Peak-normalize and save a generated tensor as WAV using soundfile."""
-
+def _prepare_audio_for_output(audio: torch.Tensor) -> torch.Tensor:
     audio = audio.detach().to(torch.float32).cpu()
     if audio.ndim == 3:
         if audio.shape[0] != 1:
@@ -188,8 +186,57 @@ def save_audio_tensor(path: str | Path, audio: torch.Tensor, sample_rate: int) -
     peak = audio.abs().max()
     if torch.isfinite(peak) and float(peak) > 0.0:
         audio = audio / peak
-    audio = audio.clamp(-1.0, 1.0)
+    return audio.clamp(-1.0, 1.0)
 
+
+def _channel_correlation(left: torch.Tensor, right: torch.Tensor) -> float | None:
+    left = left - left.mean()
+    right = right - right.mean()
+    denominator = left.square().sum().sqrt() * right.square().sum().sqrt()
+    if not torch.isfinite(denominator) or float(denominator) <= 1e-12:
+        return None
+    return float((left * right).sum() / denominator)
+
+
+def compute_audio_difference_stats(base_audio: torch.Tensor, control_audio: torch.Tensor) -> dict[str, Any]:
+    """Compare generated output waveforms after applying the WAV output normalization."""
+
+    base = _prepare_audio_for_output(base_audio)
+    control = _prepare_audio_for_output(control_audio)
+    compared_samples = min(int(base.shape[-1]), int(control.shape[-1]))
+    compared_channels = min(int(base.shape[0]), int(control.shape[0]))
+    base_compared = base[:compared_channels, :compared_samples]
+    control_compared = control[:compared_channels, :compared_samples]
+    diff = control_compared - base_compared
+
+    base_rms = float(base_compared.square().mean().sqrt())
+    control_rms = float(control_compared.square().mean().sqrt())
+    diff_rms = float(diff.square().mean().sqrt())
+
+    correlations = [
+        _channel_correlation(base_compared[channel], control_compared[channel])
+        for channel in range(compared_channels)
+    ]
+
+    return {
+        "base_shape": list(base.shape),
+        "control_shape": list(control.shape),
+        "channels": compared_channels,
+        "compared_samples": compared_samples,
+        "max_abs_diff": float(diff.abs().max()),
+        "mean_abs_diff": float(diff.abs().mean()),
+        "rms_diff": diff_rms,
+        "base_rms": base_rms,
+        "control_rms": control_rms,
+        "relative_rms_diff": diff_rms / max(base_rms, 1e-12),
+        "channel_correlation": correlations,
+    }
+
+
+def save_audio_tensor(path: str | Path, audio: torch.Tensor, sample_rate: int) -> None:
+    """Peak-normalize and save a generated tensor as WAV using soundfile."""
+
+    audio = _prepare_audio_for_output(audio)
     data = audio.transpose(0, 1).contiguous().numpy().astype(np.float32)
     sf.write(str(path), data, int(sample_rate), format="WAV", subtype="PCM_16")
 

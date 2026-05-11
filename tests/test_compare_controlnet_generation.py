@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from stable_audio_control.inference.control_compare import (
     build_compare_metadata,
+    compute_audio_difference_stats,
     extract_control_checkpoint_state_dicts,
     write_compare_metadata,
 )
@@ -103,6 +104,23 @@ class ControlNetGenerationCompareTests(unittest.TestCase):
         self.assertTrue(loaded["control"]["use_ema"])
         self.assertTrue(loaded["paths"]["base_output"].endswith("base.wav"))
         self.assertTrue(loaded["paths"]["control_output"].endswith("control.wav"))
+
+    def test_computes_audio_difference_stats_from_generated_tensors_after_output_normalization(self) -> None:
+        base = torch.tensor([[[0.0, 0.5, -0.5], [0.25, -0.25, 0.0]]])
+        control = torch.tensor([[[0.0, 0.25, -0.5], [0.25, 0.0, 0.0]]])
+
+        stats = compute_audio_difference_stats(base, control)
+
+        self.assertEqual(stats["base_shape"], [2, 3])
+        self.assertEqual(stats["control_shape"], [2, 3])
+        self.assertEqual(stats["compared_samples"], 3)
+        self.assertEqual(stats["channels"], 2)
+        self.assertAlmostEqual(stats["max_abs_diff"], 0.5)
+        self.assertAlmostEqual(stats["mean_abs_diff"], 0.16666666666666666)
+        self.assertGreater(stats["base_rms"], 0.0)
+        self.assertGreater(stats["control_rms"], 0.0)
+        self.assertLess(stats["rms_diff"], stats["base_rms"])
+        self.assertEqual(len(stats["channel_correlation"]), 2)
 
     def test_compare_script_parser_defaults_to_minimal_reproducible_outputs(self) -> None:
         module = _load_compare_script_module()
