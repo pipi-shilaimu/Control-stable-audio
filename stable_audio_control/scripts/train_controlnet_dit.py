@@ -584,11 +584,20 @@ def main() -> None:
         shuffle=True,
     )
     make_dataloader_custom_metadata_picklable(train_dl, dataset_config)
+    # Overfit debug: extract a single batch and wrap it in a proper DataLoader
+    # so PyTorch Lightning can inspect it correctly (it rejects plain lists).
+    from torch.utils.data import IterableDataset, DataLoader
 
-    # 打个小补丁，只取一个 batch 来过拟合调试
-    single_data = next(iter(train_dl))  # type: ignore # 从原始 DataLoader 里取出第一个 batch
-    train_dl = [single_data]            # 把 DataLoader 替换成一个只含一个 batch 的列表
+    single_data = next(iter(train_dl))  # type: ignore
 
+    class _SingleBatchDataset(IterableDataset):
+        def __init__(self, batch):
+            self.batch = batch
+        def __iter__(self):
+            while True:
+                yield self.batch
+
+    train_dl = DataLoader(_SingleBatchDataset(single_data), batch_size=None, num_workers=0)
     # --- Validation DataLoader (optional) ---
     val_dl = None
     callbacks = []
