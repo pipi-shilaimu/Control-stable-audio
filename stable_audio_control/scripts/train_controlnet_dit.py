@@ -645,12 +645,6 @@ def main() -> None:
     ]
     if args.ckpt_at_step > 0:
         callbacks.append(StepCheckpoint(args.ckpt_at_step))
-    parser.add_argument(
-        "--sigint-save",
-        type=_str_to_bool,
-        default=True,
-        help="If True, save checkpoint on Ctrl+C. Set to false to just exit quickly.",
-    )
     if args.val_dataset_config is not None:
         val_dataset_config_path = Path(args.val_dataset_config)
         if not val_dataset_config_path.exists():
