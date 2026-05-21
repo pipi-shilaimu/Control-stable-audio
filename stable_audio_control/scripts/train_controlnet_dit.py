@@ -175,6 +175,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="If True, save checkpoint on Ctrl+C. Set to false to just exit quickly.",
     )
     parser.add_argument(
+        "--quiet",
+        type=_str_to_bool,
+        default=False,
+        help="Disable progress bar to keep log files clean when redirecting to file.",
+    )
+    parser.add_argument(
         "--precision",
         type=str,
         default="16-mixed",
@@ -710,6 +716,7 @@ def main() -> None:
         limit_train_batches=float(args.limit_train_batches),
         default_root_dir=args.default_root_dir,
         check_val_every_n_epoch=val_check_setting,
+        enable_progress_bar=not args.quiet,
     )
 
     print(f"model_name={args.model_name}")
