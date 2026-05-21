@@ -632,7 +632,12 @@ def main() -> None:
         print('  checkpoint_dir=' + str(Path(args.default_root_dir) / 'checkpoints'))
     else:
         print("Validation: disabled (no --val-dataset-config)")
-
+    
+    
+    for oc in model_config.get("training", {}).get("optimizer_configs", {}).values():
+        sc = oc.get("scheduler", {})
+        if sc.get("config", {}).get("warmup") is not None:
+            sc["config"]["warmup"] = 0.0
 
     training_wrapper = create_training_wrapper(
         model_config=model_config,
