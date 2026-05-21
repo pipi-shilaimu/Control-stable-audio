@@ -6,10 +6,10 @@
 ## 本文覆盖范围
 本套文档基于当前仓库源码组织方式，重点解释“代码如何流动”，而不是重复配置项逐字段说明。  
 配置字段的细节仍建议配合英文原始文档阅读：
-- [Diffusion](../diffusion.md)
-- [Autoencoders](../autoencoders.md)
-- [Datasets](../datasets.md)
-- [Conditioning](../conditioning.md)
+- [Diffusion](../upstream/diffusion.md)
+- [Autoencoders](../upstream/autoencoders.md)
+- [Datasets](../upstream/datasets.md)
+- [Conditioning](../upstream/conditioning.md)
 
 ## 3分钟速读版
 - 先看“文档地图”，确定你当前是训练、推理、扩展还是排障场景。
@@ -49,10 +49,9 @@
 2. [排障手册](./troubleshooting.md)
 
 ## 关键入口清单
-- 训练入口：[`train.py`](../../train.py)
 - Gradio 入口：[`run_gradio.py`](../../run_gradio.py)
-- 预编码入口：[`pre_encode.py`](../../pre_encode.py)
-- 模型解包入口：[`unwrap_model.py`](../../unwrap_model.py)
+
+> `train.py`、`pre_encode.py`、`unwrap_model.py` 为上游 `stable-audio-tools` 仓库文件，本仓库不包含。
 
 ## 术语约定
 - 条件控制：conditioning

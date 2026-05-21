@@ -3,7 +3,20 @@
     "allow": [
       "Bash(python \"c:/PROJECT/StableAudio/scripts/train_control_smoke.py\")",
       "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from stable_audio_tools import get_pretrained_model; model, config = get_pretrained_model\\('stabilityai/stable-audio-open-1.0'\\); transformer = model.model.model.transformer; print\\('transformer type:', type\\(transformer\\).__name__\\); print\\('num layers:', len\\(transformer.layers\\)\\); print\\('dim:', getattr\\(transformer, 'dim', 'N/A'\\)\\); print\\('dim_in:', getattr\\(transformer, 'project_in', None\\).in_features if hasattr\\(transformer, 'project_in'\\) else 'N/A'\\); print\\('dim_out:', getattr\\(transformer, 'project_out', None\\).out_features if hasattr\\(transformer, 'project_out'\\) else 'N/A'\\)\")",
-      "Bash(.venv/Scripts/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from stable_audio_tools import get_pretrained_model; model, config = get_pretrained_model\\('stabilityai/stable-audio-open-1.0'\\); transformer = model.model.model.transformer; print\\('transformer type:', type\\(transformer\\).__name__\\); print\\('num layers:', len\\(transformer.layers\\)\\); print\\('dim:', getattr\\(transformer, 'dim', 'N/A'\\)\\)\")"
-    ]
+      "Bash(.venv/Scripts/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from stable_audio_tools import get_pretrained_model; model, config = get_pretrained_model\\('stabilityai/stable-audio-open-1.0'\\); transformer = model.model.model.transformer; print\\('transformer type:', type\\(transformer\\).__name__\\); print\\('num layers:', len\\(transformer.layers\\)\\); print\\('dim:', getattr\\(transformer, 'dim', 'N/A'\\)\\)\")",
+      "Skill(gsd-help)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh repo *)",
+      "PowerShell(gh repo view ZhiYi-R/moon-bridge --json name,description,url 2>&1)",
+      "PowerShell(curl.exe -s -L \"https://raw.githubusercontent.com/ZhiYi-R/moon-bridge/main/README.md\" 2>$null | Select-Object -First 200)",
+      "PowerShell(Get-ChildItem \"C:\\\\PROJECT\\\\stable-audio-controlnet\" -ErrorAction SilentlyContinue | Select-Object Name; if \\(-not \\(Test-Path \"C:\\\\PROJECT\\\\stable-audio-controlnet\"\\)\\) { Write-Output \"DIR_NOT_FOUND\" })",
+      "Read(//c/PROJECT/**)",
+      "Read(//c//**)",
+      "PowerShell(Get-ChildItem \"C:\\\\PROJECT\\\\StableAudio\\\\stable-audio-controlnet\" -Recurse -Depth 2 | Where-Object { -not $_.PSIsContainer } | ForEach-Object { $_.FullName.Replace\\(\"C:\\\\PROJECT\\\\StableAudio\\\\stable-audio-controlnet\\\\\", \"\"\\) })"
+    ],
+    "defaultMode": "bypassPermissions"
   }
 }

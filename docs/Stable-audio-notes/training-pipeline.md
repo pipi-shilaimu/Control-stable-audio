@@ -8,6 +8,7 @@
 
 ## 3分钟速读版
 - `train.py` 做四件事：读配置、建数据、建模型/包装器、交给 `pl.Trainer.fit`。
+- **本项目额外支持**：通过 `--val-dataset-config` 启用 `validation_step` + `ModelCheckpoint` 自动保存最优权重。
 - checkpoint 默认是“训练包装器”格式，推理前通常需要先 `unwrap_model.py` 解包。
 - diffusion 训练里最关键的开关是 `diffusion_objective`、`timestep_sampler`、`pre_encoded`。
 - demo 回调能最早暴露“模型在学什么”，建议优先盯住 demo 音频与频谱。
@@ -82,6 +83,16 @@
 - `DiffusionCondInpaintDemoCallback`
 - `AudioLanguageModelDemoCallback`
 
+## 3b. 本项目验证机制
+
+本项目（`train_controlnet_dit.py`）未使用上游的 DemoCallback，但新增了可选的验证机制：
+
+- 传入 `--val-dataset-config <path>` 后创建验证 DataLoader（`shuffle=False`）。
+- 利用父类 `DiffusionCondTrainingWrapper` 已有的 `validation_step` / `on_validation_epoch_end`。
+- 在固定 timestep `[0.1, 0.3, 0.5, 0.7, 0.9]` 上分别计算 MSE loss，聚合为 `val/avg_loss`。
+- 同时挂载 `ModelCheckpoint(monitor="val/avg_loss", mode="min")`，自动保存 top-3 最佳 checkpoint。
+- 不传 `--val-dataset-config` 时行为不变，完全向后兼容。
+
 ## 4. 常见训练命令模板
 
 ### 4.1 从零训练
@@ -133,7 +144,8 @@ python3 ./unwrap_model.py \
 1. `model_type` 是否与期望 wrapper 匹配。  
 2. `training.demo` 是否包含该 wrapper 需要的字段（例如条件扩散常见 `num_demos`、`demo_cfg_scales`）。  
 3. 如果使用 `--pretransform-ckpt-path`，checkpoint 是否与模型 pretransform 结构匹配。  
-4. 多卡时策略、精度和 batch 是否与硬件匹配。  
+4. **（本项目）** 如需验证监控：准备 `dataset_config_val.json`，并在启动时加 `--val-dataset-config` 和 `--val-check-interval`。  
+5. 多卡时策略、精度和 batch 是否与硬件匹配。  
 
 ## 7. 相关文档
 - 架构关系： [架构总览](./architecture-overview.md)
@@ -141,4 +153,4 @@ python3 ./unwrap_model.py \
 - Diffusion 内核细节： [Diffusion 深潜](./diffusion-deep-dive.md)
 - 推理与采样： [推理与 UI](./inference-and-ui.md)
 - 典型报错： [排障手册](./troubleshooting.md)
-- 英文字段说明： [Diffusion](../diffusion.md), [Autoencoders](../autoencoders.md), [Datasets](../datasets.md)
+- 英文字段说明： [Diffusion](../upstream/diffusion.md), [Autoencoders](../upstream/autoencoders.md), [Datasets](../upstream/datasets.md)

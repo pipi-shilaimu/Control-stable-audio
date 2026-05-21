@@ -20,7 +20,7 @@ SIGMA_MIN = 0.3
 SIGMA_MAX = 500.0
 SEED = 12345
 MODEL_HALF = True
-OUTPUT_PATH = Path("output.wav")
+OUTPUT_PATH = Path("output11.wav")
 
 
 def _resolve_device() -> torch.device:

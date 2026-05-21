@@ -1,1 +1,1 @@
-理解项目内容请阅读C:\PROJECT\StableAudio\导航.md
+理解项目内容请阅读 docs/README.md

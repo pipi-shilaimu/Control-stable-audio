@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
+from pytorch_lightning.callbacks import ModelCheckpoint
+
 import pytorch_lightning as pl
 import torch
 from torch import nn
@@ -129,6 +131,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Lightning output root dir.",
     )
     parser.add_argument("--ckpt-path", type=str, default=None, help="Optional checkpoint path for resume.")
+    parser.add_argument(
+        "--val-dataset-config",
+        type=str,
+        default=None,
+        help="Path to validation dataset config JSON. If provided, validation step and ModelCheckpoint will be enabled.",
+    )
+    parser.add_argument(
+        "--val-check-interval",
+        type=int,
+        default=100,
+        help="How many training steps between validation loops. Only used if --val-dataset-config is set.",
+    )
     parser.add_argument(
         "--precision",
         type=str,
@@ -571,6 +585,42 @@ def main() -> None:
     )
     make_dataloader_custom_metadata_picklable(train_dl, dataset_config)
 
+    # --- Validation DataLoader (optional) ---
+    val_dl = None
+    callbacks = []
+    if args.val_dataset_config is not None:
+        val_dataset_config_path = Path(args.val_dataset_config)
+        if not val_dataset_config_path.exists():
+            raise FileNotFoundError(f"Validation dataset config not found: {val_dataset_config_path}")
+        val_dataset_config = load_json(str(val_dataset_config_path))
+        val_dl = create_dataloader_from_config(
+            dataset_config=val_dataset_config,
+            batch_size=int(args.batch_size),
+            sample_size=int(model_config["sample_size"]),
+            sample_rate=sample_rate,
+            audio_channels=int(model_config.get("audio_channels", 2)),
+            num_workers=effective_num_workers,
+            shuffle=False,
+        )
+        make_dataloader_custom_metadata_picklable(val_dl, val_dataset_config)
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=Path(args.default_root_dir) / "checkpoints",
+            filename="controlnet-{step}-{val_avg_loss:.4f}",
+            monitor="val/avg_loss",
+            mode="min",
+            save_top_k=3,
+            save_last=True,
+            every_n_train_steps=args.val_check_interval,
+            auto_insert_metric_name=False,
+        )
+        callbacks.append(checkpoint_callback)
+        print(f"Validation enabled:")
+        print(f"  val_dataset_config={val_dataset_config_path.resolve()}")
+        print('  checkpoint_dir=' + str(Path(args.default_root_dir) / 'checkpoints'))
+    else:
+        print("Validation: disabled (no --val-dataset-config)")
+
+
     training_wrapper = create_training_wrapper(
         model_config=model_config,
         model=control_model,
@@ -585,9 +635,11 @@ def main() -> None:
         print(f"CUDA unavailable; precision '{precision}' may be unsupported on CPU. Switching to '32-true'.")
         precision = "32-true"
 
+    val_check_setting = None if val_dl is None else args.val_check_interval
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=int(args.devices),
+        callbacks=callbacks if callbacks else None,
         precision=precision,
         max_steps=int(args.max_steps),
         accumulate_grad_batches=int(args.accumulate_grad_batches),
@@ -595,6 +647,7 @@ def main() -> None:
         log_every_n_steps=int(args.log_every_n_steps),
         limit_train_batches=float(args.limit_train_batches),
         default_root_dir=args.default_root_dir,
+        check_val_every_n_epoch=val_check_setting,
     )
 
     print(f"model_name={args.model_name}")
@@ -604,7 +657,12 @@ def main() -> None:
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
 
-    trainer.fit(training_wrapper, train_dataloaders=train_dl, ckpt_path=args.ckpt_path)
+    trainer.fit(
+        training_wrapper,
+        train_dataloaders=train_dl,
+        val_dataloaders=val_dl,
+        ckpt_path=args.ckpt_path,
+    )
 
 
 if __name__ == "__main__":

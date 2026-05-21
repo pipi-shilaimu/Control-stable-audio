@@ -125,4 +125,4 @@ python3 ./run_gradio.py \
 - Diffusion 内核细节： [Diffusion 深潜](./diffusion-deep-dive.md)
 - 扩展策略： [扩展手册](./extension-playbook.md)
 - 报错定位： [排障手册](./troubleshooting.md)
-- 英文配置细节： [Diffusion](../diffusion.md), [Conditioning](../conditioning.md)
+- 英文配置细节： [Diffusion](../upstream/diffusion.md), [Conditioning](../upstream/conditioning.md)

@@ -108,6 +108,18 @@
 - `--accelerator`（默认 `auto`）
 - `--devices`（默认 `1`）
 - `--precision`（默认 `16-mixed`）
+
+### 5.6 验证与 Checkpoint 参数
+
+- `--val-dataset-config`（默认 `None`）
+  - 验证集 dataset config JSON 路径。
+  - 传入后启用 `validation_step`，自动监控 `val/avg_loss`。
+  - 不传则跳过验证，保持向后兼容。
+- `--val-check-interval`（默认 `100`）
+  - 每多少训练步做一次验证。
+  - 仅当 `--val-dataset-config` 设置时有效。
+  - 同时控制 `ModelCheckpoint` 的保存频率。
+
   - 若当前无 CUDA 且不是 `32-true`，脚本会自动切到 `32-true` 并打印提示。
 - `--default-root-dir`（默认 `outputs/train_controlnet_dit`）
 
@@ -181,17 +193,34 @@
 - `MelodyAwareDiffusionCondTrainingWrapper` 继承自 `DiffusionCondTrainingWrapper`。
 - 在 `training_step/validation_step` 前，先把当前 batch waveform 写入 melody augmenter。
 
-### Step H：创建 Trainer 并执行 `fit`
+### Step H：构建验证 DataLoader（可选）
 
-- 通过 `pl.Trainer(...)` 注入训练参数。
+- 若传了 `--val-dataset-config`：
+  - 读取验证集配置，创建 `val_dl`（`shuffle=False`，保证跨 step 的 loss 可比）。
+  - 挂载 `ModelCheckpoint` 回调，监控 `val/avg_loss`（越小越好），保留 top-3 最佳 + `last` checkpoint。
+  - `check_val_every_n_epoch` 设为 `--val-check-interval`。
+- 否则 `check_val_every_n_epoch=None`，Trainer 跳过 validation，完全向后兼容。
+
+### Step I：创建 Trainer 并执行 `fit`
+
+- 通过 `pl.Trainer(...)` 注入训练参数 + `callbacks` + `check_val_every_n_epoch`。
 - 输出关键运行信息（模型名、数据配置路径、sample_size、可训练参数样例）。
 - 调用：
 
 ```python
-trainer.fit(training_wrapper, train_dataloaders=train_dl, ckpt_path=args.ckpt_path)
+trainer.fit(
+    training_wrapper,
+    train_dataloaders=train_dl,
+    val_dataloaders=val_dl,  # None 时跳过验证
+    ckpt_path=args.ckpt_path,
+)
 ```
 
 ---
+
+---
+
+## 7. 输出与成功判据
 
 ## 7. 输出与成功判据
 
@@ -201,8 +230,12 @@ trainer.fit(training_wrapper, train_dataloaders=train_dl, ckpt_path=args.ckpt_pa
    - `model_name=...`
    - `dataset_config=...`
    - `trainable_name_samples=...`
+   - （如有验证集）`Validation enabled:` + 配置路径
 2. 训练日志中 `train/loss` 是否为有限值。
-3. 显存占用和 step 速度是否符合预期。
+3. **若启用验证**：TensorBoard 中出现 `val/loss_0.1` ... `val/loss_0.9` 和 `val/avg_loss` 曲线。
+   - `train/loss` 持续下降 + `val/avg_loss` 开始反弹 = 过拟合信号。
+   - 最佳 checkpoint 自动保存在 `{default_root_dir}/checkpoints/`，文件名含 `step` 和 `val_avg_loss`。
+4. 显存占用和 step 速度是否符合预期。
 
 若出现持续 NaN/Inf，先缩小学习率、缩短音频长度或降低 batch size 进行定位。
 
@@ -219,7 +252,7 @@ trainer.fit(training_wrapper, train_dataloaders=train_dl, ckpt_path=args.ckpt_pa
 
 3. 训练效果高度依赖数据 metadata 质量
 - 需要稳定的 `prompt`、`seconds_*`、`padding_mask` 等字段。
-- 具体参考 `docs/datasets.md`。
+- 具体参考 `../../upstream/datasets.md`。
 
 ---
 
@@ -252,13 +285,27 @@ trainer.fit(training_wrapper, train_dataloaders=train_dl, ckpt_path=args.ckpt_pa
   - 减小 `--batch-size`
   - 确认 dataset config 中 `custom_metadata_module` 可导入。
 
+### 6) 传了 `--val-dataset-config` 但没看到 val 日志
+
+- 原因：验证集可能太小，Lightning 的 `check_val_every_n_epoch` 语义在工作步数上可能跳过了你期望的验证时机。
+- 处理：先确认 `val_avg_loss` 是否在 `global_step` 为 `val_check_interval` 的整数倍时输出。如果完全不出现，尝试在 `trainer.fit` 开头加 `limit_val_batches=1.0`。
+- 另外验证父类 `DiffusionCondTrainingWrapper` 的 `validation_step` 依赖 `val_dataloaders` 存在——确认 `--val-dataset-config` 路径正确且数据可读。
+
+### 7) checkpoint 文件在哪里？
+
+- `ModelCheckpoint` 默认输出到 `{default_root_dir}/checkpoints/`。
+- 文件名格式 `controlnet-{step}-{val_avg_loss:.4f}.ckpt`。
+- 若没有 `--val-dataset-config`，不会创建 checkpoint 回调。
+
 ---
+
+
 
 ## 10. 与相关文档的关系
 
-- CQT 细节：`docs/Control-net-notes/doc/cqt_topk.zh-CN.md`
-- 开训前最小烟测：`docs/Control-net-notes/doc/train_control_smoke_usage.zh-CN.md`
-- 数据配置规范：`docs/datasets.md`
+- CQT 细节：`cqt_topk.md`
+- 开训前最小烟测：`train_control_smoke.md`
+- 数据配置规范：`../../upstream/datasets.md`
 
 建议顺序：
 

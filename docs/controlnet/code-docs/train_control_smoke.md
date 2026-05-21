@@ -189,7 +189,7 @@ Smoke PASS: one training step completed with finite loss and expected freeze beh
 
 本脚本的实际运行证据与结论，可参考：
 
-- `docs/Control-net-notes/train_control_smoke_report_2026-04-21.zh-CN.md`
+- `../smoke_report_2026-04-21.md`
 
 建议流程：
 

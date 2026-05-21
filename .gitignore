@@ -6,10 +6,15 @@ tmp/
 C:\PROJECT\StableAudio\stable_audio_control\scripts\__pycache__\
 .claude/
 .idea/
-stable_audio_control/data/
 outputs/
 .venv/
 *.wav
 __pycache__/
 *.pyc
 data.zip
+note/
+stable-audio-controlnet/
+.planning/
+noob-docs/
+mtg*/
+song_describer/
