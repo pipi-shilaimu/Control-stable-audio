@@ -169,6 +169,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Save one checkpoint at this specific global_step (not periodically). 0 = disabled.",
     )
     parser.add_argument(
+        "--sigint-save",
+        type=_str_to_bool,
+        default=True,
+        help="If True, save checkpoint on Ctrl+C. Set to false to just exit quickly.",
+    )
+    parser.add_argument(
         "--precision",
         type=str,
         default="16-mixed",
@@ -639,6 +645,12 @@ def main() -> None:
     ]
     if args.ckpt_at_step > 0:
         callbacks.append(StepCheckpoint(args.ckpt_at_step))
+    parser.add_argument(
+        "--sigint-save",
+        type=_str_to_bool,
+        default=True,
+        help="If True, save checkpoint on Ctrl+C. Set to false to just exit quickly.",
+    )
     if args.val_dataset_config is not None:
         val_dataset_config_path = Path(args.val_dataset_config)
         if not val_dataset_config_path.exists():
@@ -720,6 +732,10 @@ def main() -> None:
     
     def _sigint_handler(sig, frame):
         import os
+        if not args.sigint_save:
+            print("\n[SIGINT] sigint_save=False, exiting without saving.")
+            os._exit(0)
+
         step = trainer.global_step
         ckpt_path = ckpt_dir_sig / f"interrupted-step-{step}.ckpt"
         print(f"\n[SIGINT] Saving checkpoint at step {step} to {ckpt_path} ...")
@@ -729,7 +745,7 @@ def main() -> None:
         except Exception as e:
             print(f"[SIGINT] Save failed: {e}")
         os._exit(0)
-    
+
     signal.signal(signal.SIGINT, _sigint_handler)
     
     trainer.fit(
