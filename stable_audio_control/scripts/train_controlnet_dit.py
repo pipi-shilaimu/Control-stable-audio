@@ -585,6 +585,10 @@ def main() -> None:
     )
     make_dataloader_custom_metadata_picklable(train_dl, dataset_config)
 
+    # 打个小补丁，只取一个 batch 来过拟合调试
+    single_data = next(iter(train_dl))  # type: ignore # 从原始 DataLoader 里取出第一个 batch
+    train_dl = [single_data]            # 把 DataLoader 替换成一个只含一个 batch 的列表
+
     # --- Validation DataLoader (optional) ---
     val_dl = None
     callbacks = []
@@ -656,7 +660,7 @@ def main() -> None:
     print(f"sample_rate={sample_rate}, sample_size={model_config['sample_size']}, batch_size={args.batch_size}")
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
-
+    print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")
     trainer.fit(
         training_wrapper,
         train_dataloaders=train_dl,
