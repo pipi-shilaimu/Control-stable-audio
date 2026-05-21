@@ -40,6 +40,24 @@ from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper  
 install_torchaudio_load_fallback()
 
 
+
+class StepCheckpoint(pl.Callback):
+    """Save a single checkpoint at a specific global_step, then do nothing more."""
+    def __init__(self, target_step: int):
+        super().__init__()
+        self.target_step = int(target_step)
+        self._saved = False
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if not self._saved and trainer.global_step >= self.target_step:
+            ckpt_dir = Path(trainer.default_root_dir) / "checkpoints"
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"controlnet-step-{self.target_step}.ckpt"
+            trainer.save_checkpoint(str(ckpt_path))
+            print(f"StepCheckpoint: saved {ckpt_path}")
+
+
+
 def patch_stable_audio_tools_inverse_lr_for_torch() -> None:
     """Patch stable-audio-tools' InverseLR for PyTorch versions without `verbose`."""
     from stable_audio_tools.training import utils as training_utils
@@ -140,8 +158,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--val-check-interval",
         type=int,
-        default=100,
         help="How many training steps between validation loops. Only used if --val-dataset-config is set.",
+        default=100,
+    )
+    parser.add_argument(
+        "--ckpt-at-step",
+        type=int,
+        default=0,
+        help="Save one checkpoint at this specific global_step (not periodically). 0 = disabled.",
     )
     parser.add_argument(
         "--precision",
@@ -600,7 +624,19 @@ def main() -> None:
     train_dl = DataLoader(_SingleBatchDataset(single_data), batch_size=None, num_workers=0)
     # --- Validation DataLoader (optional) ---
     val_dl = None
-    callbacks = []
+    callbacks = [
+        # 无论有无验证集，都按步数定时保存 checkpoint
+        # save_last=True 确保 Ctrl+C 时 Lightning 会写 last.ckpt
+        ModelCheckpoint(
+            dirpath=Path(args.default_root_dir) / "checkpoints",
+            filename="controlnet-step={step}",
+            save_last=True,
+            save_top_k=-1,
+            # every_n_train_steps disabled; use --ckpt-at-step for one-shot save
+        ),
+    ]
+    if args.ckpt_at_step > 0:
+        callbacks.append(StepCheckpoint(args.ckpt_at_step))
     if args.val_dataset_config is not None:
         val_dataset_config_path = Path(args.val_dataset_config)
         if not val_dataset_config_path.exists():

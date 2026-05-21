@@ -120,6 +120,14 @@
   - 仅当 `--val-dataset-config` 设置时有效。
   - 同时控制 `ModelCheckpoint` 的保存频率。
 
+- `--ckpt-at-step`（默认 `0`）
+  - 在指定的 `global_step` 保存一次 checkpoint，只存一次，后面不再保存。
+  - 使用场景：睡前开训，指定 `--ckpt-at-step 3000`，跑到第 3000 步时自动保存一份，
+    方便第二天起来直接拿这个 checkpoint 做生成对比。
+  - 配合 `save_last=True`（Ctrl+C 时自动保存 `last.ckpt`），两个机制互补。
+  - `0` 表示禁用（默认）。
+
+
   - 若当前无 CUDA 且不是 `32-true`，脚本会自动切到 `32-true` 并打印提示。
 - `--default-root-dir`（默认 `outputs/train_controlnet_dit`）
 
@@ -219,8 +227,6 @@ trainer.fit(
 ---
 
 ---
-
-## 7. 输出与成功判据
 
 ## 7. 输出与成功判据
 
