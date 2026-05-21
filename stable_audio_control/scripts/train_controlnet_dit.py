@@ -6,6 +6,7 @@ import importlib
 import inspect
 import json
 import random
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
@@ -626,7 +627,8 @@ def main() -> None:
     val_dl = None
     callbacks = [
         # 无论有无验证集，都按步数定时保存 checkpoint
-        # save_last=True 确保 Ctrl+C 时 Lightning 会写 last.ckpt
+        # save_last 仅在正常结束时生效，Ctrl+C 不一定触发；
+        # 真正的 Ctrl+C 保护靠下面的 signal handler。
         ModelCheckpoint(
             dirpath=Path(args.default_root_dir) / "checkpoints",
             filename="controlnet-step={step}",
@@ -711,6 +713,25 @@ def main() -> None:
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
     print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")
+
+    # --- Ctrl+C 信号处理：截获中断，保存 checkpoint 再退出 ---
+    ckpt_dir_sig = Path(args.default_root_dir) / "checkpoints"
+    ckpt_dir_sig.mkdir(parents=True, exist_ok=True)
+    
+    def _sigint_handler(sig, frame):
+        import os
+        step = trainer.global_step
+        ckpt_path = ckpt_dir_sig / f"interrupted-step-{step}.ckpt"
+        print(f"\n[SIGINT] Saving checkpoint at step {step} to {ckpt_path} ...")
+        try:
+            trainer.save_checkpoint(str(ckpt_path))
+            print(f"[SIGINT] Checkpoint saved. Exiting.")
+        except Exception as e:
+            print(f"[SIGINT] Save failed: {e}")
+        os._exit(0)
+    
+    signal.signal(signal.SIGINT, _sigint_handler)
+    
     trainer.fit(
         training_wrapper,
         train_dataloaders=train_dl,
