@@ -78,8 +78,15 @@ for step in range(20):
     r, m = b[0], b[1]
     if r.ndim == 2:
         r = r.unsqueeze(0)
+
+    # Normalize metadata: padding_mask must be wrapped in a list
     if isinstance(m, dict):
+        pm = m.get("padding_mask")
+        if isinstance(pm, torch.Tensor):
+            m = dict(m)
+            m["padding_mask"] = [pm]
         m = [m]
+
     r = r.to(device)
     for mi in m:
         for k, v in list(mi.items()):
@@ -87,6 +94,7 @@ for step in range(20):
                 mi[k] = v.to(device)
             elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
                 mi[k] = [t.to(device) for t in v]
+
     opt.zero_grad()
     loss = tw.training_step((r, m), 0)
     loss.backward()
