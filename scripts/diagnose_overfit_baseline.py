@@ -39,7 +39,7 @@ def load_json(path):
 def main():
     model_name = "stabilityai/stable-audio-open-1.0"
     lr = 1e-4
-    max_steps = 500
+    max_steps = 50
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset_config = load_json(_DATASET_CONFIG)
@@ -170,7 +170,8 @@ def main():
                     m[k] = [t.to(device=device) for t in v]
 
         optimizer.zero_grad()
-        loss = training_wrapper.training_step((reals, metadata), 0)
+        with torch.autocast(device_type=device.type, enabled=False):
+            loss = training_wrapper.training_step((reals, metadata), 0)
         loss.backward()
         optimizer.step()
 
