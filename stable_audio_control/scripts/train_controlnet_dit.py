@@ -55,6 +55,7 @@ class StepCheckpoint(pl.Callback):
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = ckpt_dir / f"controlnet-step-{self.target_step}.ckpt"
             trainer.save_checkpoint(str(ckpt_path))
+            self._saved = True
             print(f"StepCheckpoint: saved {ckpt_path}")
 
 
