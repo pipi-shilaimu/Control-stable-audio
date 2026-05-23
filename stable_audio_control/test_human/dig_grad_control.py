@@ -2,18 +2,21 @@
 复制 train_controlnet_dit.py 的关键搭建逻辑，跑 20 步，
 打印 control_layers / zero_linears / melody_encoder 的梯度 norm 和参数变化。
 """
+
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
+#for p in Path(__file__).resolve().parents:
+#    print(str(p))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import ipdb
+bp = ipdb.set_trace
 import importlib.util
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, IterableDataset
-
-from diagnose_overfit_baseline import load_json
 from stable_audio_control.audio_io import install_torchaudio_load_fallback
 from stable_audio_control.melody.extractors import (
     MelodyExtractor,
@@ -29,27 +32,21 @@ from stable_audio_tools import get_pretrained_model
 from stable_audio_tools.data.dataset import SampleDataset, LocalDatasetConfig
 from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper
 
+def load_json(path):
+    import json
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+
 install_torchaudio_load_fallback()
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATASET_CONFIG = str(_PROJECT_ROOT / "stable_audio_control/data/mtg_jamendo/dataset_config_train_30.json")
 
 
+
 def main():
-    model_name = "stabilityai/stable-audio-open-1.0"
-    lr = 1e-4
-    device = torch.device("cuda")
 
-    # --- 1. Load data (same as baseline) ---
-    cfg = load_json(_DATASET_CONFIG)
-    base_model, model_config = get_pretrained_model(model_name)
-    ss = int(model_config["sample_size"])
-    sr = int(model_config["sample_rate"])
-    ac = int(model_config.get("audio_channels", 2))
-    fc = "mono" if ac == 1 else "stereo"
-
-
-    print("sample_rate:", sr, "sample_size:", ss, "force_channels:", fc)
     
     configs = []
     for adc in cfg.get("datasets", []):
@@ -222,25 +219,26 @@ def main():
     probes_before = {}
     for prefix in ["control_layers", "zero_linears", "melody_encoder", "control_projector"]:
         for n, p in control_model.named_parameters():
-            if n.startswith(prefix) and p.requires_grad and p.ndim >= 2:
+        # 只要名称中包含该前缀，且满足其他条件
+            if prefix in n and p.requires_grad and p.ndim >= 2:
                 probes[prefix] = n
                 probes_before[prefix] = p.detach().clone()
                 break
-
+    #bp()
     for prefix, name in probes.items():
         p = dict(control_model.named_parameters())[name]
         print(f"probe {prefix}: {name}  shape={list(p.shape)}")
 
+
+    
     # --- 7. Training loop ---
     it = iter(dl)
     conditioner = control_model.base_wrapper.conditioner  # MelodyControlAugmenter
-
     for step in range(20):
         b = next(it)
         r, m = b[0], b[1]
         if r.ndim == 2:
             r = r.unsqueeze(0)
-
         # Normalize metadata
         if isinstance(m, dict):
             pm = m.get("padding_mask")
@@ -248,15 +246,16 @@ def main():
                 m = dict(m)
                 m["padding_mask"] = [pm]
             m = [m]
-
         r = r.to(device)
         for mi in m:
+    
             for k, v in list(mi.items()):
                 if isinstance(v, torch.Tensor):
                     mi[k] = v.to(device)
+       
                 elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
                     mi[k] = [t.to(device) for t in v]
-
+                 
         # Inject batch audio into conditioner before training step
         conditioner.set_batch_audio(r)
 
@@ -269,7 +268,7 @@ def main():
         for prefix in ["control_layers", "zero_linears", "melody_encoder", "control_projector"]:
             gn = 0.0
             for n, p in control_model.named_parameters():
-                if n.startswith(prefix) and p.grad is not None:
+                if prefix in n and p.grad is not None:
                     gn += p.grad.norm().item() ** 2
             grad_info[prefix] = gn ** 0.5
 
@@ -282,15 +281,23 @@ def main():
             delta = (p_after - probes_before[prefix]).abs().max().item()
             probes_before[prefix] = p_after.clone()
             delta_info[prefix] = delta
-
+        #bp()
         print(f"step {step:2d}  loss={loss.item():.4f}  "
               f"gl_ctl={grad_info.get('control_layers',0):.3f}  gl_z={grad_info.get('zero_linears',0):.3f}  "
               f"gl_mel={grad_info.get('melody_encoder',0):.3f}  gl_proj={grad_info.get('control_projector',0):.3f}  "
               f"d_ctl={delta_info.get('control_layers',0):.2e}  d_z={delta_info.get('zero_linears',0):.2e}  "
               f"d_mel={delta_info.get('melody_encoder',0):.2e}")
-
     print("DONE")
 
-
-if __name__ == "__main__":
-    main()
+model_name = "stabilityai/stable-audio-open-1.0"
+lr = 1e-4
+device = torch.device("cuda")
+    # --- 1. Load data (same as baseline) ---
+cfg = load_json(_DATASET_CONFIG)
+base_model, model_config = get_pretrained_model(model_name)
+ss = int(model_config["sample_size"])
+sr = int(model_config["sample_rate"])
+ac = int(model_config.get("audio_channels", 2))
+fc = "mono" if ac == 1 else "stereo"
+print("sample_rate:", sr, "sample_size:", ss, "force_channels:", fc)
+main()
