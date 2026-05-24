@@ -187,8 +187,8 @@ class ControlNetContinuousTransformer(nn.Module):
                 dim=1,
             )
 
-        # 控制流从与主干同构的表示出发，再叠加外部控制信号。
-        x_ctrl = x_base + ctrl
+        # 控制分支从纯控制信号出发，不混入 backbone 的激活值，
+        x_ctrl = ctrl
 
         # 层循环：前 N 层执行“控制支路 + 主干支路 + zero_linear 注入”，其余层仅走主干。
         for layer_ix, base_layer in enumerate(self.base.layers):
