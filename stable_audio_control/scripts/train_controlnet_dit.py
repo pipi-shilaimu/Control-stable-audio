@@ -194,6 +194,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--melody-embedding-dim", type=int, default=64)
     parser.add_argument("--melody-hidden-dim", type=int, default=256)
     parser.add_argument("--melody-conv-layers", type=int, default=2)
+    parser.add_argument(
+        "--deterministic-encode",
+        type=_str_to_bool,
+        default=False,
+        help="Use deterministic VAE encoder mean instead of stochastic VAE bottleneck sampling. Useful for overfit debugging.",
+    )
 
     # Melody feature args
     parser.add_argument(
@@ -350,21 +356,27 @@ class MelodyControlAugmenter(nn.Module):
 class MelodyAwareDiffusionCondTrainingWrapper(DiffusionCondTrainingWrapper):
     """Training wrapper that injects batch waveform into melody augmenter each step."""
 
-    def __init__(self, *args, melody_augmenter: MelodyControlAugmenter, **kwargs) -> None:
+    def __init__(self, *args, melody_augmenter: MelodyControlAugmenter, deterministic_encode: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.melody_augmenter = melody_augmenter
-
+        self.deterministic_encode = deterministic_encode
     def _prepare_batch(self, batch):
         reals = batch[0]
         if reals.ndim == 4 and reals.shape[0] == 1:
             reals = reals[0]
 
-        if self.pre_encoded:
-            raise RuntimeError(
-                "pre_encoded=True is not supported in this script because melody extraction requires waveform audio."
-            )
-
         self.melody_augmenter.set_batch_audio(reals)
+
+        if self.deterministic_encode:
+            # Overfit debug mode: bypass VAE bottleneck random sampling
+            with torch.no_grad():
+                raw = self.diffusion.pretransform.model.encoder(reals)  # [B, 128, L]
+                latent = raw[:, :64, :]
+            self.pre_encoded = True
+            return latent, normalize_metadata_padding_masks(batch[1])
+
+        # Normal mode: let parent training_step run pretrainform.encode()
+        self.pre_encoded = False
         return reals, normalize_metadata_padding_masks(batch[1])
 
     def training_step(self, batch, batch_idx):
@@ -445,6 +457,7 @@ def create_training_wrapper(
     melody_augmenter: MelodyControlAugmenter,
     learning_rate_override: Optional[float],
     use_ema_override: bool,
+    deterministic_encode: bool = False,
 ) -> MelodyAwareDiffusionCondTrainingWrapper:
     training_config = model_config.get("training", {})
     learning_rate, optimizer_configs = resolve_training_optimizer_settings(
@@ -454,6 +467,7 @@ def create_training_wrapper(
 
     return MelodyAwareDiffusionCondTrainingWrapper(
         model=model,
+        deterministic_encode=deterministic_encode,
         melody_augmenter=melody_augmenter,
         lr=learning_rate,
         mask_padding=training_config.get("mask_padding", False),
@@ -620,7 +634,7 @@ def main() -> None:
     # so PyTorch Lightning can inspect it correctly (it rejects plain lists).
     from torch.utils.data import IterableDataset, DataLoader
 
-    single_data = next(iter(train_dl))  # type: ignore
+    #single_data = next(iter(train_dl))  # type: ignore
 
     class _SingleBatchDataset(IterableDataset):
         def __init__(self, batch):
@@ -629,7 +643,7 @@ def main() -> None:
             while True:
                 yield self.batch
 
-    train_dl = DataLoader(_SingleBatchDataset(single_data), batch_size=None, num_workers=0)
+    #train_dl = DataLoader(_SingleBatchDataset(single_data), batch_size=None, num_workers=0)
     # --- Validation DataLoader (optional) ---
     val_dl = None
     callbacks = [
@@ -690,6 +704,7 @@ def main() -> None:
         melody_augmenter=melody_augmenter,
         learning_rate_override=args.learning_rate,
         use_ema_override=bool(args.use_ema),
+        deterministic_encode=args.deterministic_encode,
     )
 
     accelerator = args.accelerator
@@ -719,7 +734,7 @@ def main() -> None:
     print(f"sample_rate={sample_rate}, sample_size={model_config['sample_size']}, batch_size={args.batch_size}")
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
-    print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")
+    #print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")
 
     # --- Ctrl+C 信号处理：截获中断，保存 checkpoint 再退出 ---
     ckpt_dir_sig = Path(args.default_root_dir) / "checkpoints"

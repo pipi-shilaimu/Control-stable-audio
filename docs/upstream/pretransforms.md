@@ -6,6 +6,15 @@ At the moment, `stable-audio-tools` supports two pretransforms, frozen autoencod
 Pretransforms have a similar interface to autoencoders with "encode" and "decode" functions defined for each pretransform.
 
 ## Autoencoder pretransform
+
+
+> ⚠️ **VAE bottleneck 随机采样警告（2026-05-23）**
+> 当 pretransform 使用 VAE autoencoder 时，`encode()` 内部的 `VAEBottleneck.encode()`
+> 每步通过 `vae_sample()` 生成新的随机噪声 ε（`torch.randn_like(mean) × stdev + mean`）。
+> `torch.no_grad()` 和 `model.eval()` 对此无效。在冻结的扩散训练中，这导致每步 latent
+> 不同，使模型追移动靶，永远无法收敛。修复方式：用 `model.encoder(audio)` 的 mean 输出
+> （前 `latent_dim` 个通道）替代 `encode()`，绕过 bottleneck 采样。
+
 To define a model with an autoencoder pretransform, you can define the "pretransform" property in the model config, with the `type` property set to `autoencoder`. The `config` property should be an autoencoder model definition.
 
 Example:

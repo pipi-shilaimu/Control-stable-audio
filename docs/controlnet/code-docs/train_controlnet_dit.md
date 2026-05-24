@@ -155,6 +155,13 @@
 
 ---
 
+
+### 5.6 VAE Encoder 确定性开关
+
+- `--deterministic-encode`（默认 `false`）
+  - `false`：使用原生 `pretransform.encode()`（含 VAE bottleneck 随机采样），匹配 backbone 训练与推理分布。
+  - `true`：跳过 VAE bottleneck，直接用 encoder 的 mean 输出，latent 每步完全一致，适合过拟合调试。
+
 ## 6. 脚本内部流程（逐步）
 
 ### Step A：解析参数与设定随机种子
@@ -249,9 +256,9 @@ trainer.fit(
 
 ## 8. 当前已知限制
 
-1. 不支持 `pre_encoded=True` 路线
-- 原因：当前脚本在 step 内需要真实 waveform 来在线提 CQT。
-- 触发点：`MelodyAwareDiffusionCondTrainingWrapper._set_melody_batch(...)` 会显式报错。
+1. 内部使用 `pre_encoded=True` 机制（当 `--deterministic-encode true` 时）
+- 确定性模式下，`_prepare_batch` 返回预编码 latent + 设 `pre_encoded=True`，让父类跳过自己的 `pretransform.encode()`。
+- 正常模式下（`--deterministic-encode false`），返回 waveform 给父类，走原生 VAE 采样路径。
 
 2. CQT 在线提取有额外算力开销
 - `librosa` 后端尤其慢，建议训练优先使用 `nnAudio`（`--cqt-backend auto` 或 `nnaudio`）。
