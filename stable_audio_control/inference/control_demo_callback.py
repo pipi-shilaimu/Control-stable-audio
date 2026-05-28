@@ -23,7 +23,7 @@ from torch import nn
 from stable_audio_tools.inference.sampling import sample
 from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper
 from stable_audio_tools.training.utils import log_audio, log_image, log_point_cloud
-from stable_audio_tools.visualization.audio import audio_spectrogram_image
+from stable_audio_tools.interface.aeiou import audio_spectrogram_image
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 

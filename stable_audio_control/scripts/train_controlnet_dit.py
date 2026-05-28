@@ -653,8 +653,8 @@ def main() -> None:
     #train_dl = DataLoader(_SingleBatchDataset(single_data), batch_size=None, num_workers=0)
     # --- Validation DataLoader (optional) ---
     val_dl = None
-    callbacks = [
-        # ControlNet demo callback: generates audio at intervals for quality checking
+    callbacks = []
+    # ControlNet demo callback: generates audio at intervals for quality checking
     if args.demo_every > 0:
         callbacks.append(
             ControlNetDemoCallback(
@@ -668,10 +668,10 @@ def main() -> None:
                 control_id=args.control_id,
             )
         )
-
     # 无论有无验证集，都按步数定时保存 checkpoint
-        # save_last 仅在正常结束时生效，Ctrl+C 不一定触发；
-        # 真正的 Ctrl+C 保护靠下面的 signal handler。
+    # save_last 仅在正常结束时生效，Ctrl+C 不一定触发；
+    # 真正的 Ctrl+C 保护靠下面的 signal handler。
+    callbacks.append(
         ModelCheckpoint(
             dirpath=Path(args.default_root_dir) / "checkpoints",
             filename="controlnet-step={step}",
@@ -679,7 +679,7 @@ def main() -> None:
             save_top_k=-1,
             # every_n_train_steps disabled; use --ckpt-at-step for one-shot save
         ),
-    ]
+    )
     if args.ckpt_at_step > 0:
         callbacks.append(StepCheckpoint(args.ckpt_at_step))
     if args.val_dataset_config is not None:
