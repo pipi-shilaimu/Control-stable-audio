@@ -22,7 +22,7 @@ for _ in range(NUM_REPEATS):
     audio = real_audio
 
     with torch.no_grad():
-        raw = pretransform.model.encoder(audio)
+        pretransform.eval()
         latent_1 = pretransform.encode(audio)
         latent_2 = pretransform.encode(audio)
 

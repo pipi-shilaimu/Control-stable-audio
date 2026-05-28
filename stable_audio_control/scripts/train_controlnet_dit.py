@@ -35,7 +35,8 @@ from stable_audio_control.models import (  # noqa: E402
 from stable_audio_tools import get_pretrained_model  # noqa: E402
 from stable_audio_tools.data.dataset import create_dataloader_from_config  # noqa: E402
 from stable_audio_tools.models.diffusion import ConditionedDiffusionModelWrapper  # noqa: E402
-from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper  # noqa: E402
+from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper
+from stable_audio_control.inference.control_demo_callback import ControlNetDemoCallback  # noqa: E402
 
 
 install_torchaudio_load_fallback()
@@ -199,6 +200,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=_str_to_bool,
         default=False,
         help="Use deterministic VAE encoder mean instead of stochastic VAE bottleneck sampling. Useful for overfit debugging.",
+    )
+    parser.add_argument(
+        "--demo-every",
+        type=int,
+        default=0,
+        help="Generate demo audio every N steps. 0 = disabled (default). Useful for checking ControlNet quality during training.",
     )
 
     # Melody feature args
@@ -647,7 +654,22 @@ def main() -> None:
     # --- Validation DataLoader (optional) ---
     val_dl = None
     callbacks = [
-        # 无论有无验证集，都按步数定时保存 checkpoint
+        # ControlNet demo callback: generates audio at intervals for quality checking
+    if args.demo_every > 0:
+        callbacks.append(
+            ControlNetDemoCallback(
+                demo_every=args.demo_every,
+                num_demos=min(4, int(args.batch_size)),
+                sample_size=int(model_config["sample_size"]),
+                demo_steps=100,
+                sample_rate=int(model_config["sample_rate"]),
+                demo_cfg_scales=[3, 6, 9],
+                control_scale=args.default_control_scale,
+                control_id=args.control_id,
+            )
+        )
+
+    # 无论有无验证集，都按步数定时保存 checkpoint
         # save_last 仅在正常结束时生效，Ctrl+C 不一定触发；
         # 真正的 Ctrl+C 保护靠下面的 signal handler。
         ModelCheckpoint(
