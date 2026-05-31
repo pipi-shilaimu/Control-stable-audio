@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import typing as tp
 import torch
+import torchaudio
 import soundfile as sf
 import pytorch_lightning as pl
 from einops import rearrange
@@ -29,6 +30,42 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_only
 DEFAULT_CONTROL_SCALES = [0.0, 0.1, 0.3, 0.6, 1.0]
 DEFAULT_CONTROL_VARIANTS = ["correct", "shuffled", "zero"]
 _CONTROL_SCALES_UNSET = object()
+
+
+def prepare_demo_control_audio(
+    audio: torch.Tensor,
+    *,
+    source_sample_rate: int,
+    target_sample_rate: int,
+    target_sample_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Normalize a user-provided control audio file to [1, 2, target_sample_size]."""
+
+    audio = audio.to(torch.float32)
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(0)
+    if audio.ndim != 2:
+        raise ValueError(f"Expected control audio [C,T] or [T], got shape={tuple(audio.shape)}")
+
+    if audio.shape[0] == 1:
+        audio = audio.repeat(2, 1)
+    elif audio.shape[0] > 2:
+        audio = audio[:2]
+    if audio.shape[0] != 2:
+        raise ValueError(f"Expected mono/stereo control audio, got channels={audio.shape[0]}")
+
+    if int(source_sample_rate) != int(target_sample_rate):
+        resampler = torchaudio.transforms.Resample(int(source_sample_rate), int(target_sample_rate))
+        audio = resampler(audio)
+
+    target_sample_size = max(1, int(target_sample_size))
+    if audio.shape[-1] < target_sample_size:
+        audio = torch.nn.functional.pad(audio, (0, target_sample_size - audio.shape[-1]))
+    elif audio.shape[-1] > target_sample_size:
+        audio = audio[..., :target_sample_size]
+
+    return audio.unsqueeze(0).to(device=device, dtype=torch.float32)
 
 
 def _format_scale(value: float | int) -> str:
@@ -50,6 +87,8 @@ class ControlNetDemoCallback(pl.Callback):
         control_scale: tp.Optional[float] = None,
         control_scales: tp.Union[tp.Sequence[float], None, object] = _CONTROL_SCALES_UNSET,
         control_variants: tp.Optional[tp.Sequence[str]] = None,
+        demo_control_audio_path: tp.Optional[str] = None,
+        demo_prompt: tp.Optional[str] = None,
         control_id: str = "melody_control",
     ):
         super().__init__()
@@ -63,6 +102,8 @@ class ControlNetDemoCallback(pl.Callback):
         self.control_scales = self._resolve_control_scales(control_scale, control_scales)
         self.control_scale = float(self.control_scales[-1])
         self.control_variants = list(control_variants or DEFAULT_CONTROL_VARIANTS)
+        self.demo_control_audio_path = demo_control_audio_path
+        self.demo_prompt = demo_prompt
         self.control_id = control_id
 
     def _resolve_control_scales(
@@ -111,16 +152,28 @@ class ControlNetDemoCallback(pl.Callback):
             f"_{variant}"
         )
 
-    def make_variant_reals(self, reals: torch.Tensor, variant: str) -> torch.Tensor:
+    def make_variant_reals(self, reals: torch.Tensor, variant: str, *, shuffle_by_time: bool = False) -> torch.Tensor:
         if variant == "correct":
             return reals
         if variant == "shuffled":
-            if reals.shape[0] > 1:
+            if reals.shape[0] > 1 and not shuffle_by_time:
                 return torch.roll(reals, shifts=1, dims=0)
             return torch.flip(reals, dims=[-1])
         if variant == "zero":
             return torch.zeros_like(reals)
         raise ValueError(f"Unknown control variant: {variant}")
+
+    def load_demo_control_audio(self, device: torch.device) -> torch.Tensor:
+        if self.demo_control_audio_path is None:
+            raise RuntimeError("load_demo_control_audio called without demo_control_audio_path.")
+        audio, source_sample_rate = torchaudio.load(self.demo_control_audio_path)
+        return prepare_demo_control_audio(
+            audio,
+            source_sample_rate=int(source_sample_rate),
+            target_sample_rate=int(self.sample_rate),
+            target_sample_size=int(self.demo_samples),
+            device=device,
+        )
 
     @rank_zero_only
     @torch.no_grad()
@@ -141,10 +194,16 @@ class ControlNetDemoCallback(pl.Callback):
             metadata = list(metadata)
         if isinstance(metadata, list):
             demo_count = min(self.num_demos, reals.shape[0], len(metadata))
-            demo_cond = metadata[:demo_count]
+            demo_cond = [
+                dict(item) if isinstance(item, dict) else item
+                for item in metadata[:demo_count]
+            ]
         else:
             demo_count = min(self.num_demos, reals.shape[0])
-            demo_cond = [metadata] * demo_count
+            demo_cond = [
+                dict(metadata) if isinstance(metadata, dict) else metadata
+                for _ in range(demo_count)
+            ]
 
         if demo_count <= 0:
             print("[ControlNetDemo] Skipping demo: empty batch.")
@@ -152,12 +211,15 @@ class ControlNetDemoCallback(pl.Callback):
             return
 
         demo_reals = reals[:demo_count]
+        external_control_reals = None
+        if self.demo_control_audio_path is not None:
+            external_control_reals = self.load_demo_control_audio(module.device).repeat(demo_count, 1, 1)
 
         # Normalize metadata: unconditionally set prompt + wrap padding_mask in list
 
         for item in demo_cond:
             try:
-                item["prompt"] = str(item.get("prompt", "music"))
+                item["prompt"] = str(self.demo_prompt if self.demo_prompt is not None else item.get("prompt", "music"))
                 pm = item.get("padding_mask")
                 if isinstance(pm, torch.Tensor):
                     item["padding_mask"] = [pm]
@@ -180,7 +242,14 @@ class ControlNetDemoCallback(pl.Callback):
                 print(f"[ControlNetDemo] cfg_scale={cfg_scale} control_scale={control_scale} variant={variant}")
 
                 if melody_augmenter is not None:
-                    melody_augmenter.set_batch_audio(self.make_variant_reals(demo_reals, variant))
+                    control_reals = external_control_reals if external_control_reals is not None else demo_reals
+                    melody_augmenter.set_batch_audio(
+                        self.make_variant_reals(
+                            control_reals,
+                            variant,
+                            shuffle_by_time=external_control_reals is not None,
+                        )
+                    )
 
                 with torch.cuda.amp.autocast():
                     conditioning = diffusion.conditioner(demo_cond, module.device)

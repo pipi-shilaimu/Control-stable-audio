@@ -8,8 +8,8 @@ parser.add_argument("--audio-dir", type=str, required=True)
 parser.add_argument("--manifest", type=str, required=True)
 args = parser.parse_args()
 
-audio_dir = Path(args.audio_dir).resolve()
-manifest_path = Path(args.manifest).resolve()
+audio_dir = Path(args.audio_dir)
+manifest_path = Path(args.manifest)
 
 # 加载 manifest
 manifest = json.loads(manifest_path.read_text("utf-8"))
@@ -25,8 +25,11 @@ manifest_target = manifest_dir / f"{audio_dir.parent.name}.json"
 config_target = audio_dir.parent / "dataset_config_train.json"
 
 manifest_dir.mkdir(parents=True, exist_ok=True)
-shutil.copy2(str(manifest_path), str(manifest_target))
-print(f"manifest -> {manifest_target}")
+if manifest_path.resolve() != manifest_target.resolve():
+    shutil.copy2(str(manifest_path), str(manifest_target))
+    print(f"manifest -> {manifest_target}")
+else:
+    print(f"manifest already in place: {manifest_target}")
 
 config = {
     "dataset_type": "audio_dir",

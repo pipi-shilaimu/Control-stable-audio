@@ -40,8 +40,39 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertEqual(args.melody_conv_layers, 2)
         self.assertIsNone(args.seconds_total)
         self.assertIsNone(args.sample_size)
+        self.assertEqual(module.parse_demo_cfg_scales(args.demo_cfg_scales), [3.0, 6.0, 9.0])
+        self.assertEqual(args.demo_steps, 100)
         self.assertEqual(module.parse_demo_control_scales(args.demo_control_scales), [0.0, 0.1, 0.3, 0.6, 1.0])
         self.assertEqual(args.demo_control_variants, "correct,shuffled,zero")
+        self.assertIsNone(args.demo_control_audio)
+        self.assertIsNone(args.demo_prompt)
+
+    def test_arg_parser_accepts_demo_cost_overrides(self) -> None:
+        module = _load_script_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(
+            [
+                "--dataset-config",
+                "dummy_dataset.json",
+                "--demo-cfg-scales",
+                "6",
+                "--demo-steps",
+                "30",
+                "--demo-control-scales",
+                "0,1",
+                "--demo-control-variants",
+                "correct,zero",
+                "--demo-prompt",
+                "instrumental piano melody",
+            ]
+        )
+
+        self.assertEqual(module.parse_demo_cfg_scales(args.demo_cfg_scales), [6.0])
+        self.assertEqual(args.demo_steps, 30)
+        self.assertEqual(module.parse_demo_control_scales(args.demo_control_scales), [0.0, 1.0])
+        self.assertEqual(module.parse_demo_control_variants(args.demo_control_variants), ["correct", "zero"])
+        self.assertEqual(args.demo_prompt, "instrumental piano melody")
 
     def test_arg_parser_rejects_conflicting_training_length_overrides(self) -> None:
         module = _load_script_module()
@@ -110,6 +141,11 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         module = _load_script_module()
 
         self.assertEqual(module.parse_demo_control_scales("0, 0.3, 1"), [0.0, 0.3, 1.0])
+
+    def test_parses_demo_cfg_scales_csv(self) -> None:
+        module = _load_script_module()
+
+        self.assertEqual(module.parse_demo_cfg_scales("3, 6, 9"), [3.0, 6.0, 9.0])
 
     def test_parses_demo_control_variants_csv(self) -> None:
         module = _load_script_module()

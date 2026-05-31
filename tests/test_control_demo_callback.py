@@ -41,6 +41,7 @@ def _install_import_stubs() -> None:
     sys.modules.setdefault("pytorch_lightning.utilities.rank_zero", rank_zero)
 
     torchaudio = types.ModuleType("torchaudio")
+    torchaudio.load = lambda path: (_ for _ in ()).throw(RuntimeError(f"Unexpected torchaudio.load({path})"))
     sys.modules.setdefault("torchaudio", torchaudio)
 
     einops = types.ModuleType("einops")
@@ -165,6 +166,76 @@ class ControlDemoCallbackTests(unittest.TestCase):
         torch.testing.assert_close(shuffled, torch.flip(reals, dims=[-1]))
         self.assertIsNot(shuffled, reals)
 
+    def test_prepares_external_demo_control_audio_as_stereo_padded_batch(self) -> None:
+        module = _load_callback_module()
+        audio = torch.tensor([[1.0, -1.0, 0.5]], dtype=torch.float32)
+
+        prepared = module.prepare_demo_control_audio(
+            audio,
+            source_sample_rate=44_100,
+            target_sample_rate=44_100,
+            target_sample_size=5,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(tuple(prepared.shape), (1, 2, 5))
+        torch.testing.assert_close(prepared[0, 0], torch.tensor([1.0, -1.0, 0.5, 0.0, 0.0]))
+        torch.testing.assert_close(prepared[0, 1], torch.tensor([1.0, -1.0, 0.5, 0.0, 0.0]))
+
+    def test_train_batch_end_uses_external_control_audio_for_correct_variant(self) -> None:
+        module = _load_callback_module()
+        loaded_audio = torch.tensor([[0.25, 0.5, 0.75, 1.0]], dtype=torch.float32)
+        module.torchaudio.load = lambda path: (loaded_audio, 44_100)
+        module.sample = lambda model, noise, steps, eta, **kwargs: noise + 1.0
+        module.sf.write = lambda *args, **kwargs: None
+        module.log_audio = lambda *args, **kwargs: None
+        module.log_image = lambda *args, **kwargs: None
+        module.audio_spectrogram_image = lambda audio: audio
+
+        class MelodyAugmenter:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def set_batch_audio(self, audio: torch.Tensor) -> None:
+                self.calls.append(audio.clone())
+
+        class Diffusion:
+            io_channels = 1
+            pretransform = None
+
+            def conditioner(self, cond, device):
+                return {"ok": True}
+
+        augmenter = MelodyAugmenter()
+        module_under_test = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            diffusion=Diffusion(),
+            melody_augmenter=augmenter,
+            eval=lambda: None,
+            train=lambda: None,
+        )
+        trainer = types.SimpleNamespace(global_step=1, default_root_dir=".", logger=object())
+        batch_reals = torch.full((2, 1, 4), 9.0)
+        metadata = [{"prompt": "a"}, {"prompt": "b"}]
+        callback = module.ControlNetDemoCallback(
+            demo_every=1,
+            num_demos=2,
+            sample_size=4,
+            sample_rate=44_100,
+            demo_cfg_scales=[3],
+            control_scales=[1.0],
+            control_variants=["correct"],
+            demo_control_audio_path="melody.wav",
+        )
+
+        callback.on_train_batch_end(trainer, module_under_test, None, (batch_reals, metadata), 0)
+
+        expected_single = torch.tensor(
+            [[[0.25, 0.5, 0.75, 1.0], [0.25, 0.5, 0.75, 1.0]]],
+            dtype=torch.float32,
+        )
+        torch.testing.assert_close(augmenter.calls[0], expected_single.repeat(2, 1, 1))
+
     def test_train_batch_end_recomputes_conditioning_for_each_control_variant(self) -> None:
         module = _load_callback_module()
         sample_calls = []
@@ -250,6 +321,54 @@ class ControlDemoCallbackTests(unittest.TestCase):
                 "demo_melspec_step_00000001_cfg_3_control_0p3_zero",
             ],
         )
+
+    def test_train_batch_end_overrides_demo_prompt_without_mutating_batch_metadata(self) -> None:
+        module = _load_callback_module()
+        seen_prompts = []
+
+        module.sample = lambda model, noise, steps, eta, **kwargs: noise + 1.0
+        module.sf.write = lambda *args, **kwargs: None
+        module.log_audio = lambda *args, **kwargs: None
+        module.log_image = lambda *args, **kwargs: None
+        module.audio_spectrogram_image = lambda audio: audio
+
+        class MelodyAugmenter:
+            def set_batch_audio(self, audio: torch.Tensor) -> None:
+                pass
+
+        class Diffusion:
+            io_channels = 1
+            pretransform = None
+
+            def conditioner(self, cond, device):
+                seen_prompts.append([item["prompt"] for item in cond])
+                return {"ok": True}
+
+        module_under_test = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            diffusion=Diffusion(),
+            melody_augmenter=MelodyAugmenter(),
+            eval=lambda: None,
+            train=lambda: None,
+        )
+        trainer = types.SimpleNamespace(global_step=1, default_root_dir=".", logger=object())
+        reals = torch.arange(2 * 1 * 6, dtype=torch.float32).reshape(2, 1, 6)
+        metadata = [{"prompt": "batch prompt a"}, {"prompt": "batch prompt b"}]
+        callback = module.ControlNetDemoCallback(
+            demo_every=1,
+            num_demos=2,
+            sample_size=6,
+            demo_steps=2,
+            demo_cfg_scales=[3],
+            control_scales=[1.0],
+            control_variants=["correct"],
+            demo_prompt="fixed diagnostic prompt",
+        )
+
+        callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
+
+        self.assertEqual(seen_prompts, [["fixed diagnostic prompt", "fixed diagnostic prompt"]])
+        self.assertEqual(metadata, [{"prompt": "batch prompt a"}, {"prompt": "batch prompt b"}])
 
 
 if __name__ == "__main__":

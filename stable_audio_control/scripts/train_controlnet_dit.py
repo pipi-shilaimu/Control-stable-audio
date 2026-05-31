@@ -207,6 +207,18 @@ def _csv_default(values: List[float] | List[str]) -> str:
     return ",".join(f"{value:g}" if isinstance(value, float) else str(value) for value in values)
 
 
+def parse_demo_cfg_scales(value: str) -> List[float]:
+    """Parse comma-separated cfg_scale values for demo generation."""
+
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("--demo-cfg-scales must contain at least one number.")
+    try:
+        return [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --demo-cfg-scales value: {value}") from exc
+
+
 def parse_demo_control_scales(value: str) -> List[float]:
     """Parse a comma-separated control-scale sweep for demo generation."""
 
@@ -321,6 +333,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Generate demo audio every N steps. 0 = disabled (default). Useful for checking ControlNet quality during training.",
     )
     parser.add_argument(
+        "--demo-cfg-scales",
+        type=str,
+        default="3,6,9",
+        help="Comma-separated cfg_scale values for demo generation.",
+    )
+    parser.add_argument(
+        "--demo-steps",
+        type=int,
+        default=100,
+        help="Number of diffusion sampling steps per demo generation.",
+    )
+    parser.add_argument(
         "--demo-control-scales",
         type=str,
         default=_csv_default(DEFAULT_CONTROL_SCALES),
@@ -331,6 +355,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=_csv_default(DEFAULT_CONTROL_VARIANTS),
         help="Comma-separated demo control variants: correct, shuffled, zero.",
+    )
+    parser.add_argument(
+        "--demo-control-audio",
+        type=str,
+        default=None,
+        help="Optional audio path used as the melody-control source for demo generation.",
+    )
+    parser.add_argument(
+        "--demo-prompt",
+        type=str,
+        default=None,
+        help="Optional fixed text prompt for demo generation. Defaults to each batch metadata prompt.",
     )
     length_group = parser.add_mutually_exclusive_group()
     length_group.add_argument(
@@ -806,11 +842,13 @@ def main() -> None:
                 demo_every=args.demo_every,
                 num_demos=min(4, int(args.batch_size)),
                 sample_size=effective_sample_size.sample_size,
-                demo_steps=100,
+                demo_steps=args.demo_steps,
                 sample_rate=int(model_config["sample_rate"]),
-                demo_cfg_scales=[3, 6, 9],
+                demo_cfg_scales=parse_demo_cfg_scales(args.demo_cfg_scales),
                 control_scales=parse_demo_control_scales(args.demo_control_scales),
                 control_variants=parse_demo_control_variants(args.demo_control_variants),
+                demo_control_audio_path=args.demo_control_audio,
+                demo_prompt=args.demo_prompt,
                 control_id=args.control_id,
             )
         )
@@ -908,8 +946,12 @@ def main() -> None:
     )
     print(f"min_input_length={effective_sample_size.min_input_length}")
     if args.demo_every > 0:
+        print(f"demo_cfg_scales={parse_demo_cfg_scales(args.demo_cfg_scales)}")
+        print(f"demo_steps={args.demo_steps}")
         print(f"demo_control_scales={parse_demo_control_scales(args.demo_control_scales)}")
         print(f"demo_control_variants={parse_demo_control_variants(args.demo_control_variants)}")
+        print(f"demo_control_audio={args.demo_control_audio}")
+        print(f"demo_prompt={args.demo_prompt}")
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
     #print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")
