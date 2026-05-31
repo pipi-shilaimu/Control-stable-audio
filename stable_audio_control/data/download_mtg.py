@@ -24,8 +24,8 @@ from tqdm import tqdm
 # Paths
 ROOT = Path(__file__).resolve().parent
 DATASET_REPO = ROOT / "mtg-jamendo-dataset"
-DOWNLOADS_DIR = ROOT / "mtg_jamendo_downloads"
-OUTPUT_DIR = ROOT / "mtg_jamendo_full"
+DOWNLOADS_DIR = Path("G:/PROJECT/StableAudio/data/mtg_jamendo/downloads")
+OUTPUT_DIR = Path("G:/PROJECT/StableAudio/data/mtg_jamendo")
 
 GIDS_FILE = DATASET_REPO / "data/download/raw_30s_audio_gids.txt"
 SHA256_TARS_FILE = DATASET_REPO / "data/download/raw_30s_audio_sha256_tars.txt"
@@ -105,26 +105,36 @@ def compute_sha256(filepath: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def download_from_mtg_fast(filename: str, output: str) -> None:
+def download_from_mtg_fast(filename: str, output: str, max_retries: int = 3) -> None:
     url = f"https://cdn.freesound.org/mtg-jamendo/raw_30s/audio/{filename}"
     output_path = Path(output)
-    tmp_file = None
-    try:
-        res = requests.get(url, stream=True, timeout=30)
-        res.raise_for_status()
-        total = int(res.headers.get("Content-Length", 0))
-        with tempfile.NamedTemporaryFile(prefix=output_path.name, dir=output_path.parent, delete=False) as tmp:
-            tmp_file = tmp.name
-            with tqdm(total=total, unit="B", unit_scale=True, desc=filename) as pbar:
-                for chunk in res.iter_content(chunk_size=CHUNK_SIZE):
-                    tmp.write(chunk)
-                    pbar.update(len(chunk))
-        shutil.move(tmp_file, output)
+
+    for attempt in range(1, max_retries + 1):
         tmp_file = None
-    except Exception:
-        if tmp_file and os.path.exists(tmp_file):
-            os.unlink(tmp_file)
-        raise
+        try:
+            res = requests.get(url, stream=True, timeout=60)
+            res.raise_for_status()
+            total = int(res.headers.get("Content-Length", 0))
+            with tempfile.NamedTemporaryFile(prefix=output_path.name, dir=output_path.parent, delete=False) as tmp:
+                tmp_file = tmp.name
+                with tqdm(total=total, unit="B", unit_scale=True, desc=filename) as pbar:
+                    for chunk in res.iter_content(chunk_size=CHUNK_SIZE):
+                        tmp.write(chunk)
+                        pbar.update(len(chunk))
+            shutil.move(tmp_file, output)
+            tmp_file = None
+            return
+        except Exception as e:
+            if tmp_file and os.path.exists(tmp_file):
+                os.unlink(tmp_file)
+            if attempt < max_retries:
+                wait = 5 * attempt
+                print(f"  连接失败 ({e.__class__.__name__}), {wait}s 后第 {attempt + 1}/{max_retries} 次重试...")
+                import time
+                time.sleep(wait)
+            else:
+                print(f"  下载失败，已重试 {max_retries} 次", file=sys.stderr)
+                raise
 
 def download_from_gdrive(file_id: str, output: str) -> None:
     import gdown
@@ -179,10 +189,23 @@ def reset_state() -> None:
     if STATE_FILE.exists():
         STATE_FILE.unlink()
     print("状态已重置。下次运行将从 tar-00 开始。")
-def run_batch(count: int, download_from: str) -> int:
+def run_batch(count: int, download_from: str, start_from: str | None = None) -> int:
     state = load_state()
     tars = load_tar_list()
-    start_idx = state["last_tar_index"] + 1
+    if start_from is not None:
+        if start_from.isdigit():
+            start_idx = int(start_from)
+        else:
+            try:
+                start_idx = next(i for i, t in enumerate(tars) if t["filename"] == start_from)
+            except StopIteration:
+                names = [t["filename"] for t in tars]
+                print(f"错误: 找不到 tar '{start_from}'", file=sys.stderr)
+                print(f"可用: {names[0]} ... {names[-1]}")
+                return 0
+        print(f"覆盖状态文件，从 {tars[start_idx]['filename']} 开始")
+    else:
+        start_idx = state["last_tar_index"] + 1
     if start_idx >= len(tars):
         print("所有 tar 已下载完成！")
         return 0
@@ -197,13 +220,9 @@ def run_batch(count: int, download_from: str) -> int:
     audio_dir = OUTPUT_DIR / "audio"
     manifest_dir = OUTPUT_DIR / "manifests"
     if audio_dir.exists():
-        print(f"错误: 输出目录 {audio_dir} 已存在，说明上一批还没上传完。")
-        print("请先上传并删除该目录，再跑下一批。")
-        return 0
+        print(f"  目录 {audio_dir} 已存在，本批数据将追加写入")
     if manifest_dir.exists():
-        print(f"错误: 输出目录 {manifest_dir} 已存在，说明上一批还没上传完。")
-        print("请先上传并删除该目录，再跑下一批。")
-        return 0
+        print(f"  目录 {manifest_dir} 已存在，manifest 将覆盖为本批的索引")
     audio_dir.mkdir(parents=True, exist_ok=True)
     manifest_dir.mkdir(parents=True, exist_ok=True)
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -215,16 +234,21 @@ def run_batch(count: int, download_from: str) -> int:
         print(f"  [{filename}]  第 {start_idx + idx + 1}/{len(tars)} 个 tar")
         print(f"{'='*60}")
         print(f"  下载中...")
-        if download_from == "gdrive":
-            download_from_gdrive(tar_info["file_id"], tar_path)
-        else:
-            download_from_mtg_fast(filename, tar_path)
+        try:
+            if download_from == "gdrive":
+                download_from_gdrive(tar_info["file_id"], tar_path)
+            else:
+                download_from_mtg_fast(filename, tar_path)
+        except Exception as e:
+            print(f"  下载失败: {e.__class__.__name__}: {e}", file=sys.stderr)
+            print(f"  跳过 {filename}，继续下一批")
+            continue
         print(f"  校验 SHA256...")
         actual_sha = compute_sha256(tar_path)
         if actual_sha != tar_info["sha256"]:
             os.unlink(tar_path)
-            print(f"  SHA256 校验失败，已删除。请重试。", file=sys.stderr)
-            return len(all_manifest)
+            print(f"  SHA256 校验失败，已删除。", file=sys.stderr)
+            continue
         print(f"  校验通过")
         print(f"  解压并生成 manifest...")
         manifest = extract_and_build_manifest(tar_path, audio_dir, tracks_meta, sha256_track_map)
@@ -239,7 +263,7 @@ def run_batch(count: int, download_from: str) -> int:
     config_path = OUTPUT_DIR / "dataset_config_train.json"
     config_path.write_text(json.dumps({
         "dataset_type": "audio_dir",
-        "datasets": [{"id": "mtg_jamendo_full", "path": str(audio_dir.resolve()), "custom_metadata_module": str(mm_path.resolve())}],
+        "datasets": [{"id": "mtg_jamendo", "path": str(audio_dir.resolve()), "custom_metadata_module": str(mm_path.resolve())}],
         "random_crop": True,
     }, indent=2, ensure_ascii=False), "utf-8")
     print(f"\n{'='*60}")
@@ -258,6 +282,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MTG-Jamendo 增量下载器")
     parser.add_argument("--count", type=int, default=None, help="这次下载几个 tar（每个约 5GB）")
     parser.add_argument("--from", default="mtg-fast", choices=["mtg-fast", "gdrive"], dest="download_from", help="下载源")
+    parser.add_argument("--start-from", type=str, default=None,
+                        help="从指定 tar 开始（数字如 5 或文件名如 raw_30s_audio-05.tar），覆盖状态文件")
     parser.add_argument("--status", action="store_true", help="查看进度")
     parser.add_argument("--reset", action="store_true", help="重置进度")
     return parser
@@ -276,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.count <= 0:
         print("--count 必须是正数")
         return 1
-    run_batch(args.count, args.download_from)
+    run_batch(args.count, args.download_from, args.start_from)
     return 0
 
 if __name__ == "__main__":

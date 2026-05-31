@@ -9,7 +9,7 @@ import random
 import signal
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, NamedTuple, Optional, cast
 
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -36,7 +36,17 @@ from stable_audio_tools import get_pretrained_model  # noqa: E402
 from stable_audio_tools.data.dataset import create_dataloader_from_config  # noqa: E402
 from stable_audio_tools.models.diffusion import ConditionedDiffusionModelWrapper  # noqa: E402
 from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper
-from stable_audio_control.inference.control_demo_callback import ControlNetDemoCallback  # noqa: E402
+
+# Workaround for PyTorch 2.6+ weights_only=True default: allow PosixPath in checkpoints
+import pathlib
+import torch.serialization
+torch.serialization.add_safe_globals([pathlib.PosixPath])
+
+from stable_audio_control.inference.control_demo_callback import (  # noqa: E402
+    DEFAULT_CONTROL_SCALES,
+    DEFAULT_CONTROL_VARIANTS,
+    ControlNetDemoCallback,
+)
 
 
 install_torchaudio_load_fallback()
@@ -119,6 +129,109 @@ def _str_to_bool(value: str) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
+class EffectiveTrainSampleSize(NamedTuple):
+    """Resolved audio length used consistently by train, validation, and demo."""
+
+    sample_size: int
+    seconds_total: float
+    sample_rate: int
+    min_input_length: int
+    model_config_sample_size: int
+    source: str
+
+
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    value = max(1, int(value))
+    multiple = max(1, int(multiple))
+    remainder = value % multiple
+    if remainder:
+        value += multiple - remainder
+    return value
+
+
+def resolve_effective_train_sample_size(
+    *,
+    model_config_sample_size: int,
+    sample_rate: int,
+    min_input_length: int = 1,
+    seconds_total: Optional[float] = None,
+    sample_size: Optional[int] = None,
+) -> EffectiveTrainSampleSize:
+    """Resolve the audio sample length used by every training-time data path."""
+
+    if seconds_total is not None and sample_size is not None:
+        raise ValueError("--seconds-total and --sample-size are mutually exclusive.")
+
+    sample_rate = int(sample_rate)
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive.")
+
+    min_input_length = max(1, int(min_input_length))
+    model_config_sample_size = int(model_config_sample_size)
+
+    if seconds_total is not None:
+        seconds_total = float(seconds_total)
+        if seconds_total <= 0:
+            raise ValueError("--seconds-total must be positive.")
+        raw_sample_size = int(round(seconds_total * sample_rate))
+        source = "--seconds-total"
+    elif sample_size is not None:
+        raw_sample_size = int(sample_size)
+        if raw_sample_size <= 0:
+            raise ValueError("--sample-size must be positive.")
+        source = "--sample-size"
+    else:
+        raw_sample_size = model_config_sample_size
+        source = "model_config"
+
+    aligned_sample_size = _round_up_to_multiple(raw_sample_size, min_input_length)
+    return EffectiveTrainSampleSize(
+        sample_size=aligned_sample_size,
+        seconds_total=aligned_sample_size / sample_rate,
+        sample_rate=sample_rate,
+        min_input_length=min_input_length,
+        model_config_sample_size=model_config_sample_size,
+        source=source,
+    )
+
+
+def model_min_input_length(model: nn.Module) -> int:
+    """Return the model input multiple used to keep latent/downsampled lengths valid."""
+
+    return max(1, int(getattr(model, "min_input_length", 1) or 1))
+
+
+def _csv_default(values: List[float] | List[str]) -> str:
+    return ",".join(f"{value:g}" if isinstance(value, float) else str(value) for value in values)
+
+
+def parse_demo_control_scales(value: str) -> List[float]:
+    """Parse a comma-separated control-scale sweep for demo generation."""
+
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("--demo-control-scales must contain at least one number.")
+    try:
+        return [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --demo-control-scales value: {value}") from exc
+
+
+def parse_demo_control_variants(value: str) -> List[str]:
+    """Parse and validate comma-separated demo control ablation variants."""
+
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("--demo-control-variants must contain at least one variant.")
+
+    allowed = set(DEFAULT_CONTROL_VARIANTS)
+    for part in parts:
+        if part not in allowed:
+            expected = ", ".join(DEFAULT_CONTROL_VARIANTS)
+            raise ValueError(f"Unknown control variant: {part}. Expected one of: {expected}.")
+    return parts
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -206,6 +319,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Generate demo audio every N steps. 0 = disabled (default). Useful for checking ControlNet quality during training.",
+    )
+    parser.add_argument(
+        "--demo-control-scales",
+        type=str,
+        default=_csv_default(DEFAULT_CONTROL_SCALES),
+        help="Comma-separated control_scale values for demo generation.",
+    )
+    parser.add_argument(
+        "--demo-control-variants",
+        type=str,
+        default=_csv_default(DEFAULT_CONTROL_VARIANTS),
+        help="Comma-separated demo control variants: correct, shuffled, zero.",
+    )
+    length_group = parser.add_mutually_exclusive_group()
+    length_group.add_argument(
+        "--seconds-total",
+        type=float,
+        default=None,
+        help="Effective training/demo audio length in seconds. Overrides the pretrained model_config sample_size.",
+    )
+    length_group.add_argument(
+        "--sample-size",
+        type=int,
+        default=None,
+        help="Effective training/demo audio length in samples. Rounded up to the model input multiple.",
     )
 
     # Melody feature args
@@ -586,6 +724,13 @@ def main() -> None:
     control_model = cast(ControlConditionedDiffusionWrapper, control_model)
 
     sample_rate = int(model_config["sample_rate"])
+    effective_sample_size = resolve_effective_train_sample_size(
+        model_config_sample_size=int(model_config["sample_size"]),
+        sample_rate=sample_rate,
+        min_input_length=model_min_input_length(base_model),
+        seconds_total=args.seconds_total,
+        sample_size=args.sample_size,
+    )
     model_dtype = next(control_model.parameters()).dtype
 
     extractor = build_melody_extractor(
@@ -630,7 +775,7 @@ def main() -> None:
     train_dl = create_dataloader_from_config(
         dataset_config=dataset_config,
         batch_size=int(args.batch_size),
-        sample_size=int(model_config["sample_size"]),
+        sample_size=effective_sample_size.sample_size,
         sample_rate=sample_rate,
         audio_channels=int(model_config.get("audio_channels", 2)),
         num_workers=effective_num_workers,
@@ -660,11 +805,12 @@ def main() -> None:
             ControlNetDemoCallback(
                 demo_every=args.demo_every,
                 num_demos=min(4, int(args.batch_size)),
-                sample_size=int(model_config["sample_size"]),
+                sample_size=effective_sample_size.sample_size,
                 demo_steps=100,
                 sample_rate=int(model_config["sample_rate"]),
                 demo_cfg_scales=[3, 6, 9],
-                control_scale=args.default_control_scale,
+                control_scales=parse_demo_control_scales(args.demo_control_scales),
+                control_variants=parse_demo_control_variants(args.demo_control_variants),
                 control_id=args.control_id,
             )
         )
@@ -677,7 +823,7 @@ def main() -> None:
             filename="controlnet-step={step}",
             save_last=True,
             save_top_k=-1,
-            # every_n_train_steps disabled; use --ckpt-at-step for one-shot save
+            every_n_train_steps=8000,
         ),
     )
     if args.ckpt_at_step > 0:
@@ -690,7 +836,7 @@ def main() -> None:
         val_dl = create_dataloader_from_config(
             dataset_config=val_dataset_config,
             batch_size=int(args.batch_size),
-            sample_size=int(model_config["sample_size"]),
+            sample_size=effective_sample_size.sample_size,
             sample_rate=sample_rate,
             audio_channels=int(model_config.get("audio_channels", 2)),
             num_workers=effective_num_workers,
@@ -753,7 +899,17 @@ def main() -> None:
     print(f"model_name={args.model_name}")
     print(f"dataset_config={dataset_config_path.resolve()}")
     print(f"melody_feature={args.melody_feature}, control_channels={control_channels}")
-    print(f"sample_rate={sample_rate}, sample_size={model_config['sample_size']}, batch_size={args.batch_size}")
+    print(f"sample_rate={sample_rate}, batch_size={args.batch_size}")
+    print(f"model_config_sample_size={effective_sample_size.model_config_sample_size}")
+    print(
+        "effective_train_sample_size="
+        f"{effective_sample_size.sample_size} "
+        f"({effective_sample_size.seconds_total:.4f}s, source={effective_sample_size.source})"
+    )
+    print(f"min_input_length={effective_sample_size.min_input_length}")
+    if args.demo_every > 0:
+        print(f"demo_control_scales={parse_demo_control_scales(args.demo_control_scales)}")
+        print(f"demo_control_variants={parse_demo_control_variants(args.demo_control_variants)}")
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
     #print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")

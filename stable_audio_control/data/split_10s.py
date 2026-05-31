@@ -2,51 +2,34 @@
 """Cut audio files into non-overlapping 10s MP3 segments using ffmpeg.
 
 Usage:
-    python split_10s.py --audio-dir mtg_jamendo_full/audio/no_vocals
-    python split_10s.py  # defaults to mtg_jamendo/train
+    python split_10s.py --audio-dir G:\PROJECT\StableAudio\audios
+    python split_10s.py --audio-dir G:\PROJECT\StableAudio\audios --output-dir G:\PROJECT\StableAudio\audios_10s
 """
 
 import argparse
-import json
 import subprocess
-import sys
 from pathlib import Path
 
-TARGET_SR = 44100
 SEG_DURATION = 10
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-
 parser = argparse.ArgumentParser()
-parser.add_argument("--audio-dir", type=str, default=str(SCRIPT_DIR / "mtg_jamendo/train"))
-parser.add_argument("--manifest", type=str, default=None)
+parser.add_argument("--audio-dir", type=str, required=True, help="Directory containing source audio files")
+parser.add_argument("--output-dir", type=str, default=None, help="Output directory (default: {audio_dir}_10s)")
 args = parser.parse_args()
 
-ad = Path(args.audio_dir)
-if not ad.is_absolute():
-    ad = Path.cwd() / ad
+audio_dir = Path(args.audio_dir)
+output_dir = Path(args.output_dir) if args.output_dir else audio_dir.with_name(audio_dir.name + "_10s")
+output_dir.mkdir(parents=True, exist_ok=True)
 
-manifest = None
-if args.manifest is not None:
-    mpath = Path(args.manifest)
-    if not mpath.is_absolute():
-        mpath = Path.cwd() / mpath
-    manifest = json.loads(mpath.read_text("utf-8"))
-
-segdir = ad.with_name(ad.name + "_10s")
-segdir.mkdir(parents=True, exist_ok=True)
-
-nm = {}
-cnt = 0
-files = sorted(ad.iterdir())
+total_segments = 0
+files = sorted(audio_dir.iterdir())
 
 for src in files:
     if not src.is_file():
         continue
     fn = src.name
-    entry = manifest.get(fn) if manifest else None
 
-    # Get duration
+    # Get duration via ffprobe
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
@@ -55,16 +38,16 @@ for src in files:
     try:
         duration = float(probe.stdout.strip())
     except (ValueError, TypeError):
-        print("  WARN " + fn + ": couldn't read duration, skipping")
+        print(f"  WARN {fn}: couldn't read duration, skipping")
         continue
 
-    total_segs = int(duration // SEG_DURATION)
-    if total_segs == 0:
-        print("  WARN " + fn + " too short (" + str(round(duration, 1)) + "s)")
+    n_segs = int(duration // SEG_DURATION)
+    if n_segs == 0:
+        print(f"  WARN {fn} too short ({duration:.1f}s)")
         continue
 
     base = fn.rsplit(".", 1)[0]
-    out_pattern = str(segdir / (base + "_seg%03d.mp3"))
+    out_pattern = str(output_dir / (base + "_seg%03d.mp3"))
 
     subprocess.run(
         ["ffmpeg", "-y", "-i", str(src),
@@ -75,22 +58,7 @@ for src in files:
         capture_output=True, timeout=300,
     )
 
-    # Build manifest entries from generated files
-    for seg_idx in range(total_segs):
-        sfn = base + "_seg" + str(seg_idx).zfill(3) + ".mp3"
-        if (segdir / sfn).exists():
-            if entry is not None:
-                e = dict(entry)
-                e["source_segment"] = fn + ":" + str(seg_idx * SEG_DURATION) + "s"
-                nm[sfn] = e
+    print(f"{fn} ({int(duration)}s) -> {n_segs} segs")
+    total_segments += n_segs
 
-    print(fn + " (" + str(int(duration)) + "s) -> " + str(total_segs) + " segs")
-    cnt += total_segs
-
-if manifest:
-    mfr = segdir.parent / "manifests"
-    mfr.mkdir(parents=True, exist_ok=True)
-    (mfr / "train_10s.json").write_text(json.dumps(nm, indent=2, ensure_ascii=False), "utf-8")
-    print("Manifest: " + str(mfr / "train_10s.json"))
-
-print("Total: " + str(cnt) + " segments -> " + str(segdir))
+print(f"\nDone: {total_segments} segments -> {output_dir}")

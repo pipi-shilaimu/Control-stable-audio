@@ -38,6 +38,92 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertEqual(args.melody_embedding_dim, 64)
         self.assertEqual(args.melody_hidden_dim, 256)
         self.assertEqual(args.melody_conv_layers, 2)
+        self.assertIsNone(args.seconds_total)
+        self.assertIsNone(args.sample_size)
+        self.assertEqual(module.parse_demo_control_scales(args.demo_control_scales), [0.0, 0.1, 0.3, 0.6, 1.0])
+        self.assertEqual(args.demo_control_variants, "correct,shuffled,zero")
+
+    def test_arg_parser_rejects_conflicting_training_length_overrides(self) -> None:
+        module = _load_script_module()
+        parser = module.build_arg_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "--dataset-config",
+                    "dummy_dataset.json",
+                    "--seconds-total",
+                    "10",
+                    "--sample-size",
+                    "441000",
+                ]
+            )
+
+    def test_resolves_effective_sample_size_from_seconds_total_with_model_alignment(self) -> None:
+        module = _load_script_module()
+
+        resolved = module.resolve_effective_train_sample_size(
+            model_config_sample_size=2_097_152,
+            sample_rate=44_100,
+            min_input_length=2_048,
+            seconds_total=10.0,
+            sample_size=None,
+        )
+
+        self.assertEqual(resolved.sample_size, 442_368)
+        self.assertAlmostEqual(resolved.seconds_total, 442_368 / 44_100)
+        self.assertEqual(resolved.source, "--seconds-total")
+        self.assertEqual(resolved.model_config_sample_size, 2_097_152)
+        self.assertEqual(resolved.min_input_length, 2_048)
+
+    def test_resolves_effective_sample_size_from_explicit_sample_size_with_model_alignment(self) -> None:
+        module = _load_script_module()
+
+        resolved = module.resolve_effective_train_sample_size(
+            model_config_sample_size=2_097_152,
+            sample_rate=44_100,
+            min_input_length=2_048,
+            seconds_total=None,
+            sample_size=441_001,
+        )
+
+        self.assertEqual(resolved.sample_size, 442_368)
+        self.assertAlmostEqual(resolved.seconds_total, 442_368 / 44_100)
+        self.assertEqual(resolved.source, "--sample-size")
+
+    def test_resolves_effective_sample_size_defaults_to_model_config(self) -> None:
+        module = _load_script_module()
+
+        resolved = module.resolve_effective_train_sample_size(
+            model_config_sample_size=2_097_152,
+            sample_rate=44_100,
+            min_input_length=2_048,
+            seconds_total=None,
+            sample_size=None,
+        )
+
+        self.assertEqual(resolved.sample_size, 2_097_152)
+        self.assertAlmostEqual(resolved.seconds_total, 2_097_152 / 44_100)
+        self.assertEqual(resolved.source, "model_config")
+
+    def test_parses_demo_control_scales_csv(self) -> None:
+        module = _load_script_module()
+
+        self.assertEqual(module.parse_demo_control_scales("0, 0.3, 1"), [0.0, 0.3, 1.0])
+
+    def test_parses_demo_control_variants_csv(self) -> None:
+        module = _load_script_module()
+
+        self.assertEqual(
+            module.parse_demo_control_variants("correct, shuffled, zero"),
+            ["correct", "shuffled", "zero"],
+        )
+
+    def test_rejects_unknown_demo_control_variant(self) -> None:
+        module = _load_script_module()
+
+        with self.assertRaisesRegex(ValueError, "Unknown control variant"):
+            module.parse_demo_control_variants("correct,random")
 
     def test_import_patches_stable_audio_tools_inverse_lr_for_current_torch(self) -> None:
         _load_script_module()
