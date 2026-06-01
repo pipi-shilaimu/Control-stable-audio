@@ -125,6 +125,12 @@ class ControlDemoCallbackTests(unittest.TestCase):
 
         self.assertEqual(callback.iter_control_demo_combinations(), [(3, 0.7, "correct")])
 
+    def test_default_demo_count_is_one(self) -> None:
+        module = _load_callback_module()
+        callback = module.ControlNetDemoCallback()
+
+        self.assertEqual(callback.num_demos, 1)
+
     def test_filename_and_logger_tags_include_diagnostic_dimensions(self) -> None:
         module = _load_callback_module()
         callback = module.ControlNetDemoCallback()
@@ -321,6 +327,54 @@ class ControlDemoCallbackTests(unittest.TestCase):
                 "demo_melspec_step_00000001_cfg_3_control_0p3_zero",
             ],
         )
+
+    def test_train_batch_end_writes_each_demo_without_concatenating_batch_time(self) -> None:
+        module = _load_callback_module()
+        written = []
+
+        module.sample = lambda model, noise, steps, eta, **kwargs: noise + 1.0
+        module.sf.write = lambda filename, audio, sample_rate: written.append((filename, audio.shape, sample_rate))
+        module.log_audio = lambda *args, **kwargs: None
+        module.log_image = lambda *args, **kwargs: None
+        module.audio_spectrogram_image = lambda audio: audio
+
+        class MelodyAugmenter:
+            def set_batch_audio(self, audio: torch.Tensor) -> None:
+                pass
+
+        class Diffusion:
+            io_channels = 1
+            pretransform = None
+
+            def conditioner(self, cond, device):
+                return {"ok": True}
+
+        module_under_test = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            diffusion=Diffusion(),
+            melody_augmenter=MelodyAugmenter(),
+            eval=lambda: None,
+            train=lambda: None,
+        )
+        trainer = types.SimpleNamespace(global_step=1, default_root_dir=".", logger=object())
+        reals = torch.arange(2 * 1 * 6, dtype=torch.float32).reshape(2, 1, 6)
+        metadata = [{"prompt": "a"}, {"prompt": "b"}]
+        callback = module.ControlNetDemoCallback(
+            demo_every=1,
+            num_demos=2,
+            sample_size=6,
+            demo_steps=2,
+            demo_cfg_scales=[3],
+            control_scales=[1.0],
+            control_variants=["correct"],
+        )
+
+        callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
+
+        self.assertEqual(len(written), 2)
+        self.assertEqual([shape for _, shape, _ in written], [(6, 1), (6, 1)])
+        self.assertTrue(written[0][0].endswith("_demo_00.wav"))
+        self.assertTrue(written[1][0].endswith("_demo_01.wav"))
 
     def test_train_batch_end_overrides_demo_prompt_without_mutating_batch_metadata(self) -> None:
         module = _load_callback_module()

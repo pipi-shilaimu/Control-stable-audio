@@ -18,7 +18,6 @@ import torch
 import torchaudio
 import soundfile as sf
 import pytorch_lightning as pl
-from einops import rearrange
 
 from stable_audio_tools.inference.sampling import sample
 from stable_audio_tools.training.diffusion import DiffusionCondTrainingWrapper
@@ -79,7 +78,7 @@ class ControlNetDemoCallback(pl.Callback):
     def __init__(
         self,
         demo_every: int = 2000,
-        num_demos: int = 4,
+        num_demos: int = 1,
         sample_size: int = 65536,
         demo_steps: int = 250,
         sample_rate: int = 48000,
@@ -276,28 +275,32 @@ class ControlNetDemoCallback(pl.Callback):
                     fakes = diffusion.pretransform.decode(fakes)
 
                 # --- 4. 保存音频 ---
-                fakes = rearrange(fakes, "b d n -> d (b n)")
                 stem = self.format_demo_stem(cfg_scale, control_scale, variant, trainer.global_step)
-                filename = f"{trainer.default_root_dir}/{stem}.wav"
-                fakes_out = (
-                    fakes.to(torch.float32)
-                    .div(torch.max(torch.abs(fakes)))
-                    .mul(32767)
-                    .to(torch.int16)
-                    .cpu()
-                )
-                sf.write(filename, fakes_out.cpu().numpy().T, self.sample_rate)
-                log_audio(
-                    trainer.logger,
-                    self.format_audio_tag(cfg_scale, control_scale, variant, trainer.global_step),
-                    filename,
-                    self.sample_rate,
-                )
-                log_image(
-                    trainer.logger,
-                    self.format_melspec_tag(cfg_scale, control_scale, variant, trainer.global_step),
-                    audio_spectrogram_image(fakes_out),
-                )
+                audio_tag = self.format_audio_tag(cfg_scale, control_scale, variant, trainer.global_step)
+                melspec_tag = self.format_melspec_tag(cfg_scale, control_scale, variant, trainer.global_step)
+
+                for demo_index, fake in enumerate(fakes):
+                    demo_suffix = f"_demo_{demo_index:02d}" if demo_count > 1 else ""
+                    filename = f"{trainer.default_root_dir}/{stem}{demo_suffix}.wav"
+                    fakes_out = (
+                        fake.to(torch.float32)
+                        .div(torch.max(torch.abs(fake)))
+                        .mul(32767)
+                        .to(torch.int16)
+                        .cpu()
+                    )
+                    sf.write(filename, fakes_out.cpu().numpy().T, self.sample_rate)
+                    log_audio(
+                        trainer.logger,
+                        f"{audio_tag}{demo_suffix}",
+                        filename,
+                        self.sample_rate,
+                    )
+                    log_image(
+                        trainer.logger,
+                        f"{melspec_tag}{demo_suffix}",
+                        audio_spectrogram_image(fakes_out),
+                    )
 
         finally:
             module.train()

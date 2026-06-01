@@ -246,6 +246,12 @@ def parse_demo_control_variants(value: str) -> List[str]:
     return parts
 
 
+def resolve_training_demo_count(*, batch_size: int) -> int:
+    """Return how many generated audio files each training demo should produce."""
+
+    return 1
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train ControlNet-DiT on StableAudio Open with selectable melody control features."
@@ -840,7 +846,7 @@ def main() -> None:
         callbacks.append(
             ControlNetDemoCallback(
                 demo_every=args.demo_every,
-                num_demos=min(4, int(args.batch_size)),
+                num_demos=resolve_training_demo_count(batch_size=int(args.batch_size)),
                 sample_size=effective_sample_size.sample_size,
                 demo_steps=args.demo_steps,
                 sample_rate=int(model_config["sample_rate"]),

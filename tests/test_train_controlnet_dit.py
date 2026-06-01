@@ -74,6 +74,12 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertEqual(module.parse_demo_control_variants(args.demo_control_variants), ["correct", "zero"])
         self.assertEqual(args.demo_prompt, "instrumental piano melody")
 
+    def test_training_demo_count_is_independent_of_batch_size(self) -> None:
+        module = _load_script_module()
+
+        self.assertEqual(module.resolve_training_demo_count(batch_size=1), 1)
+        self.assertEqual(module.resolve_training_demo_count(batch_size=4), 1)
+
     def test_arg_parser_rejects_conflicting_training_length_overrides(self) -> None:
         module = _load_script_module()
         parser = module.build_arg_parser()
