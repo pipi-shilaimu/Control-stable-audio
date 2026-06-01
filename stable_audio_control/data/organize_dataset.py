@@ -110,8 +110,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="发现不一致时以非零退出码终止（默认仅打印警告）"
     )
     parser.add_argument(
+<<<<<<< HEAD
         "--audio-extensions", type=str, nargs="+", default=None,
         help="要计入统计的音频扩展名，默认统计所有文件（如 --audio-extensions .wav .flac 则只统计指定扩展名）"
+=======
+        "--audio-extensions", type=str, nargs="+", default=(".wav",),
+        help="要计入统计的音频扩展名，默认 .wav（传 'none' 则统计所有文件）"
+>>>>>>> 27a9453e06d811f2ac1e25eb70280a9c91d52d17
     )
     return parser
 
@@ -135,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- 双向一致性校验 ---
     extensions: tuple[str, ...] | None = None
-    if args.audio_extensions is not None:
+    if args.audio_extensions and args.audio_extensions[0].lower() != "none":
         extensions = tuple(args.audio_extensions)
 
     result = validate_manifest_audio(audio_dir, manifest, audio_extensions=extensions)

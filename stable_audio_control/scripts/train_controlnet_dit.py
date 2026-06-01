@@ -296,6 +296,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=100,
     )
     parser.add_argument(
+        "--ckpt-every-n-steps",
+        type=int,
+        default=8000,
+        help="Save a checkpoint every N training steps (periodic).",
+    )
+    parser.add_argument(
         "--ckpt-at-step",
         type=int,
         default=0,
@@ -867,7 +873,7 @@ def main() -> None:
             filename="controlnet-step={step}",
             save_last=True,
             save_top_k=-1,
-            every_n_train_steps=8000,
+            every_n_train_steps=args.ckpt_every_n_steps,
         ),
     )
     if args.ckpt_at_step > 0:
