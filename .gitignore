@@ -29,3 +29,4 @@ stable_audio_control/data/overfit_then/
 stable_audio_control/data/temp/
 stable_audio_control/scripts/batch_generate_control.py
 overfit/
+问题/
