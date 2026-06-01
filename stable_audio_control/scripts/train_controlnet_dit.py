@@ -876,6 +876,20 @@ def main() -> None:
             every_n_train_steps=args.ckpt_every_n_steps,
         ),
     )
+    if args.learning_rate is not None and args.ckpt_path is not None:
+        class _ForceLrCallback(pl.Callback):
+            def on_train_start(self, trainer, pl_module):
+                target_lr = float(args.learning_rate)
+                for optimizer in trainer.optimizers:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = target_lr
+                        pg["initial_lr"] = target_lr
+                for config in trainer.lr_scheduler_configs:
+                    scheduler = config.scheduler
+                    if hasattr(scheduler, "base_lrs"):
+                        scheduler.base_lrs = [target_lr] * len(scheduler.base_lrs)
+                print(f"[ForceLr] Learning rate reset to {target_lr}")
+        callbacks.append(_ForceLrCallback())
     if args.ckpt_at_step > 0:
         callbacks.append(StepCheckpoint(args.ckpt_at_step))
     if args.val_dataset_config is not None:
