@@ -55,6 +55,68 @@ def _load_audio_tensor(
     return audio.unsqueeze(0)
 
 
+def _normalize_audio_batch_tensor(audio: torch.Tensor) -> torch.Tensor:
+    audio = audio.detach().to(torch.float32)
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(0)
+    if audio.ndim == 2:
+        return ensure_stereo(audio).unsqueeze(0)
+    if audio.ndim == 3:
+        return torch.stack([ensure_stereo(item) for item in audio], dim=0)
+    raise ValueError(f"Expected audio tensor [T], [C,T], or [B,C,T], got shape={tuple(audio.shape)}")
+
+
+def _match_audio_batch_size(reference_audio: torch.Tensor, generated_audio: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    reference_batch = int(reference_audio.shape[0])
+    generated_batch = int(generated_audio.shape[0])
+    if reference_batch == generated_batch:
+        return reference_audio, generated_audio
+    if reference_batch == 1:
+        return reference_audio.repeat(generated_batch, 1, 1), generated_audio
+    if generated_batch == 1:
+        return reference_audio, generated_audio.repeat(reference_batch, 1, 1)
+    raise ValueError(f"Audio batch sizes must match or be broadcastable; got {reference_batch} and {generated_batch}.")
+
+
+def _align_audio_tensor_pair(
+    reference_audio: torch.Tensor,
+    generated_audio: torch.Tensor,
+    *,
+    target_sample_rate: int,
+    target_sample_size: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    reference_audio = _normalize_audio_batch_tensor(reference_audio)
+    generated_audio = _normalize_audio_batch_tensor(generated_audio)
+    reference_audio, generated_audio = _match_audio_batch_size(reference_audio, generated_audio)
+
+    if target_sample_size is None:
+        common_sample_size = min(int(reference_audio.shape[-1]), int(generated_audio.shape[-1]))
+        if common_sample_size < 1:
+            raise ValueError("Cannot compare empty audio clips.")
+        reference_audio = reference_audio[..., :common_sample_size]
+        generated_audio = generated_audio[..., :common_sample_size]
+        alignment_mode = "common_prefix"
+    else:
+        common_sample_size = int(target_sample_size)
+        if reference_audio.shape[-1] < common_sample_size:
+            reference_audio = torch.nn.functional.pad(reference_audio, (0, common_sample_size - reference_audio.shape[-1]))
+        else:
+            reference_audio = reference_audio[..., :common_sample_size]
+        if generated_audio.shape[-1] < common_sample_size:
+            generated_audio = torch.nn.functional.pad(generated_audio, (0, common_sample_size - generated_audio.shape[-1]))
+        else:
+            generated_audio = generated_audio[..., :common_sample_size]
+        alignment_mode = "fixed_length"
+
+    alignment = {
+        "sample_rate": int(target_sample_rate),
+        "sample_size": int(common_sample_size),
+        "seconds_total": float(common_sample_size) / float(target_sample_rate),
+        "mode": alignment_mode,
+    }
+    return reference_audio, generated_audio, alignment
+
+
 def _align_audio_pair(
     reference_audio_path: str | Path,
     generated_audio_path: str | Path,
@@ -156,16 +218,16 @@ def compare_cqt_topk_features(
     if compared_frames < 1:
         raise ValueError("Cannot compare empty CQT features.")
 
-    reference = reference[..., :compared_frames].to(torch.long)
-    generated = generated[..., :compared_frames].to(torch.long)
+    reference_tokens = reference[..., :compared_frames].to(torch.long)
+    generated_tokens = generated[..., :compared_frames].to(torch.long)
 
-    reference = reference.reshape(reference.shape[0], int(top_k), 2, compared_frames).permute(0, 2, 3, 1)
-    generated = generated.reshape(generated.shape[0], int(top_k), 2, compared_frames).permute(0, 2, 3, 1)
+    reference_ranked = reference_tokens.reshape(reference_tokens.shape[0], int(top_k), 2, compared_frames).permute(0, 2, 3, 1)
+    generated_ranked = generated_tokens.reshape(generated_tokens.shape[0], int(top_k), 2, compared_frames).permute(0, 2, 3, 1)
 
     # [B, 2, F, K] -> [B, 2, F, K, K]
-    overlap = generated.unsqueeze(-1).eq(reference.unsqueeze(-2))
+    overlap = generated_ranked.unsqueeze(-1).eq(reference_ranked.unsqueeze(-2))
     matched_tokens = int(overlap.any(dim=-1).sum().item())
-    total_tokens = int(generated.numel())
+    total_tokens = int(generated_ranked.numel())
     score = float(matched_tokens / total_tokens)
 
     return {
@@ -174,6 +236,59 @@ def compare_cqt_topk_features(
         "matched_tokens": matched_tokens,
         "total_tokens": total_tokens,
         "compared_frames": compared_frames,
+        "additional_metrics": {
+            "cqt_top1_accuracy": compare_cqt_top1_accuracy(
+                reference_tokens,
+                generated_tokens,
+                tolerance_bins=0,
+            )
+        },
+    }
+
+
+def compare_cqt_top1_accuracy(
+    reference: torch.Tensor,
+    generated: torch.Tensor,
+    *,
+    tolerance_bins: int = 0,
+    ignore_zero_reference: bool = True,
+) -> dict[str, Any]:
+    """Frame-wise accuracy for the primary left/right CQT pitch channels."""
+
+    if reference.ndim != 3 or generated.ndim != 3:
+        raise ValueError(
+            f"Expected reference and generated CQT tensors with shape [B, C, F]; "
+            f"got {tuple(reference.shape)} and {tuple(generated.shape)}"
+        )
+    if reference.shape[1] < 2 or generated.shape[1] < 2:
+        raise ValueError("CQT top-1 accuracy requires at least two channels: [L0, R0].")
+
+    compared_frames = min(int(reference.shape[-1]), int(generated.shape[-1]))
+    if compared_frames < 1:
+        raise ValueError("Cannot compare empty CQT features.")
+
+    reference_top1 = reference[:, :2, :compared_frames].to(torch.long)
+    generated_top1 = generated[:, :2, :compared_frames].to(torch.long)
+
+    valid = torch.ones_like(reference_top1, dtype=torch.bool)
+    if ignore_zero_reference:
+        valid = reference_top1 != 0
+    total_tokens = int(valid.sum().item())
+    if total_tokens < 1:
+        raise ValueError("Cannot compute top-1 accuracy with no valid reference tokens.")
+
+    tolerance_bins = max(0, int(tolerance_bins))
+    matches = (generated_top1 - reference_top1).abs() <= tolerance_bins
+    matched_tokens = int((matches & valid).sum().item())
+
+    return {
+        "metric_name": "cqt_top1_pitch_accuracy",
+        "score": float(matched_tokens / total_tokens),
+        "matched_tokens": matched_tokens,
+        "total_tokens": total_tokens,
+        "compared_frames": compared_frames,
+        "tolerance_bins": tolerance_bins,
+        "ignore_zero_reference": bool(ignore_zero_reference),
     }
 
 
@@ -218,6 +333,79 @@ def compare_melody_features(
     if feature == "chromagram":
         return compare_chromagram_features(reference, generated)
     raise ValueError(f"Unsupported melody feature: {feature}")
+
+
+def compare_audio_tensors_melody_similarity(
+    reference_audio: torch.Tensor,
+    generated_audio: torch.Tensor,
+    *,
+    extractor: Any,
+    feature: MelodyFeature,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    sample_size: int | None = None,
+    seconds_total: float | None = None,
+    top_k: int = 4,
+    n_bins: int = 128,
+    bins_per_octave: int = 12,
+    fmin_hz: float = 8.175_798_915_643_707,
+    hop_length: int = 512,
+    highpass_cutoff_hz: float = 261.2,
+    cqt_backend: str = "auto",
+    chroma_bins: int = 12,
+    chroma_n_fft: int = 2048,
+) -> dict[str, Any]:
+    """Compare reference/generated audio tensors with an already-built melody extractor."""
+
+    target_sample_size = _prepare_target_sample_size(
+        sample_rate=sample_rate,
+        sample_size=sample_size,
+        seconds_total=seconds_total,
+    )
+    reference_audio, generated_audio, alignment = _align_audio_tensor_pair(
+        reference_audio,
+        generated_audio,
+        target_sample_rate=sample_rate,
+        target_sample_size=target_sample_size,
+    )
+
+    reference_feature = extractor.extract(reference_audio)
+    generated_feature = extractor.extract(generated_audio)
+    similarity = compare_melody_features(
+        reference_feature,
+        generated_feature,
+        feature=feature,
+        top_k=top_k,
+    )
+
+    feature_config = _build_feature_config(
+        feature=feature,
+        sample_rate=sample_rate,
+        top_k=top_k,
+        n_bins=n_bins,
+        bins_per_octave=bins_per_octave,
+        fmin_hz=fmin_hz,
+        hop_length=hop_length,
+        highpass_cutoff_hz=highpass_cutoff_hz,
+        cqt_backend=cqt_backend,
+        chroma_bins=chroma_bins,
+        chroma_n_fft=chroma_n_fft,
+    )
+
+    return {
+        "schema_version": 1,
+        "sources": {
+            "reference_audio": "tensor",
+            "generated_audio": "tensor",
+        },
+        "alignment": alignment,
+        "feature": {
+            "name": feature,
+            "config": feature_config,
+            "reference_shape": list(reference_feature.shape),
+            "generated_shape": list(generated_feature.shape),
+        },
+        "similarity": similarity,
+    }
 
 
 def compare_audio_melody_similarity(

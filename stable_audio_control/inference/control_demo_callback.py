@@ -13,7 +13,10 @@ _extract_control_input → control_input → base_wrapper forwarding。
 
 from __future__ import annotations
 
+import csv
 import typing as tp
+from pathlib import Path
+
 import torch
 import torchaudio
 import soundfile as sf
@@ -25,10 +28,28 @@ from stable_audio_tools.training.utils import log_audio, log_image
 from stable_audio_tools.interface.aeiou import audio_spectrogram_image
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
+from stable_audio_control.inference.melody_similarity import compare_audio_tensors_melody_similarity
+
 
 DEFAULT_CONTROL_SCALES = [0.0, 0.1, 0.3, 0.6, 1.0]
 DEFAULT_CONTROL_VARIANTS = ["correct", "shuffled", "zero"]
 _CONTROL_SCALES_UNSET = object()
+DEMO_MELODY_SIMILARITY_FIELDS = [
+    "step",
+    "demo_index",
+    "cfg_scale",
+    "control_scale",
+    "variant",
+    "audio_path",
+    "metric_name",
+    "score",
+    "cqt_top1_score",
+    "cqt_topk_score",
+    "matched_tokens",
+    "total_tokens",
+    "compared_frames",
+    "skipped_reason",
+]
 
 
 def prepare_demo_control_audio(
@@ -89,6 +110,10 @@ class ControlNetDemoCallback(pl.Callback):
         demo_control_audio_path: tp.Optional[str] = None,
         demo_prompt: tp.Optional[str] = None,
         control_id: str = "melody_control",
+        demo_melody_similarity: bool = True,
+        demo_melody_similarity_csv: str = "demo_melody_similarity.csv",
+        demo_melody_similarity_feature: str = "cqt",
+        demo_melody_similarity_top_k: int = 4,
     ):
         super().__init__()
         self.demo_every = demo_every
@@ -104,6 +129,10 @@ class ControlNetDemoCallback(pl.Callback):
         self.demo_control_audio_path = demo_control_audio_path
         self.demo_prompt = demo_prompt
         self.control_id = control_id
+        self.demo_melody_similarity = bool(demo_melody_similarity)
+        self.demo_melody_similarity_csv = demo_melody_similarity_csv
+        self.demo_melody_similarity_feature = demo_melody_similarity_feature
+        self.demo_melody_similarity_top_k = int(demo_melody_similarity_top_k)
 
     def _resolve_control_scales(
         self,
@@ -174,6 +203,153 @@ class ControlNetDemoCallback(pl.Callback):
             device=device,
         )
 
+    def _similarity_csv_path(self, default_root_dir: str | Path) -> Path:
+        path = Path(self.demo_melody_similarity_csv)
+        if path.is_absolute():
+            return path
+        return Path(default_root_dir) / path
+
+    def _write_similarity_row(self, path: Path, row: dict[str, tp.Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not path.exists()
+        with path.open("a", encoding="utf-8", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=DEMO_MELODY_SIMILARITY_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({field: row.get(field, "") for field in DEMO_MELODY_SIMILARITY_FIELDS})
+
+    def _log_similarity_metrics(
+        self,
+        trainer,
+        *,
+        cfg_scale: float,
+        control_scale: float,
+        variant: str,
+        step: int,
+        score: float | None,
+        cqt_top1_score: float | None,
+        cqt_topk_score: float | None,
+    ) -> None:
+        logger = getattr(trainer, "logger", None)
+        log_metrics = getattr(logger, "log_metrics", None)
+        if log_metrics is None:
+            return
+
+        prefix = (
+            "demo_melody_similarity/"
+            f"cfg_{_format_scale(cfg_scale)}"
+            f"_control_{_format_scale(control_scale)}"
+            f"_{variant}"
+        )
+        metrics: dict[str, float] = {}
+        if score is not None:
+            metrics[f"{prefix}/score"] = float(score)
+        if cqt_top1_score is not None:
+            metrics[f"{prefix}/top1"] = float(cqt_top1_score)
+        if cqt_topk_score is not None:
+            metrics[f"{prefix}/topk"] = float(cqt_topk_score)
+        if metrics:
+            log_metrics(metrics, step=step)
+
+    def score_demo_melody_similarity(
+        self,
+        *,
+        trainer,
+        melody_augmenter,
+        reference_reals: torch.Tensor | None,
+        fake: torch.Tensor,
+        cfg_scale: float,
+        control_scale: float,
+        variant: str,
+        step: int,
+        demo_index: int,
+        audio_path: str,
+    ) -> None:
+        if not self.demo_melody_similarity:
+            return
+
+        row: dict[str, tp.Any] = {
+            "step": int(step),
+            "demo_index": int(demo_index),
+            "cfg_scale": float(cfg_scale),
+            "control_scale": float(control_scale),
+            "variant": variant,
+            "audio_path": audio_path,
+        }
+
+        if variant == "zero":
+            row["skipped_reason"] = "zero_control_has_no_reference_melody"
+            self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+            print(
+                f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
+                f"control={control_scale} variant={variant} skipped={row['skipped_reason']}"
+            )
+            return
+
+        extractor = getattr(melody_augmenter, "extractor", None)
+        if reference_reals is None or extractor is None:
+            row["skipped_reason"] = "missing_reference_or_extractor"
+            self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+            return
+
+        try:
+            reference_audio = reference_reals[demo_index : demo_index + 1]
+            generated_audio = fake.unsqueeze(0) if fake.ndim == 2 else fake
+            metadata = compare_audio_tensors_melody_similarity(
+                reference_audio,
+                generated_audio,
+                extractor=extractor,
+                feature=tp.cast(tp.Any, self.demo_melody_similarity_feature),
+                sample_rate=int(self.sample_rate),
+                sample_size=int(self.demo_samples),
+                top_k=int(self.demo_melody_similarity_top_k),
+            )
+            similarity = metadata["similarity"]
+            score = float(similarity["score"])
+            row.update(
+                {
+                    "metric_name": similarity["metric_name"],
+                    "score": score,
+                    "matched_tokens": similarity.get("matched_tokens", ""),
+                    "total_tokens": similarity.get("total_tokens", ""),
+                    "compared_frames": similarity.get("compared_frames", ""),
+                }
+            )
+
+            cqt_top1_score = None
+            cqt_topk_score = score if similarity["metric_name"] == "cqt_topk_pitch_overlap_rate" else None
+            row["cqt_topk_score"] = "" if cqt_topk_score is None else cqt_topk_score
+            additional = similarity.get("additional_metrics", {})
+            cqt_top1 = additional.get("cqt_top1_accuracy") if isinstance(additional, dict) else None
+            if isinstance(cqt_top1, dict):
+                cqt_top1_score = float(cqt_top1["score"])
+                row["cqt_top1_score"] = cqt_top1_score
+
+            self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+            self._log_similarity_metrics(
+                trainer,
+                cfg_scale=cfg_scale,
+                control_scale=control_scale,
+                variant=variant,
+                step=step,
+                score=score,
+                cqt_top1_score=cqt_top1_score,
+                cqt_topk_score=cqt_topk_score,
+            )
+            print(
+                f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
+                f"control={control_scale} variant={variant} "
+                f"top1={cqt_top1_score if cqt_top1_score is not None else 'n/a'} "
+                f"topk={cqt_topk_score if cqt_topk_score is not None else 'n/a'}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            row["skipped_reason"] = f"{type(exc).__name__}: {exc}"
+            self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+            print(
+                f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
+                f"control={control_scale} variant={variant} skipped={row['skipped_reason']}"
+            )
+
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module: DiffusionCondTrainingWrapper, outputs, batch, batch_idx):
@@ -240,15 +416,15 @@ class ControlNetDemoCallback(pl.Callback):
             for cfg_scale, control_scale, variant in self.iter_control_demo_combinations():
                 print(f"[ControlNetDemo] cfg_scale={cfg_scale} control_scale={control_scale} variant={variant}")
 
+                variant_reals = None
                 if melody_augmenter is not None:
                     control_reals = external_control_reals if external_control_reals is not None else demo_reals
-                    melody_augmenter.set_batch_audio(
-                        self.make_variant_reals(
-                            control_reals,
-                            variant,
-                            shuffle_by_time=external_control_reals is not None,
-                        )
+                    variant_reals = self.make_variant_reals(
+                        control_reals,
+                        variant,
+                        shuffle_by_time=external_control_reals is not None,
                     )
+                    melody_augmenter.set_batch_audio(variant_reals)
 
                 with torch.cuda.amp.autocast():
                     conditioning = diffusion.conditioner(demo_cond, module.device)
@@ -300,6 +476,18 @@ class ControlNetDemoCallback(pl.Callback):
                         trainer.logger,
                         f"{melspec_tag}{demo_suffix}",
                         audio_spectrogram_image(fakes_out),
+                    )
+                    self.score_demo_melody_similarity(
+                        trainer=trainer,
+                        melody_augmenter=melody_augmenter,
+                        reference_reals=variant_reals,
+                        fake=fake,
+                        cfg_scale=cfg_scale,
+                        control_scale=control_scale,
+                        variant=variant,
+                        step=trainer.global_step,
+                        demo_index=demo_index,
+                        audio_path=filename,
                     )
 
         finally:

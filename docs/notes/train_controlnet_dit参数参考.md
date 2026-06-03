@@ -1,6 +1,6 @@
 # train_controlnet_dit.py 完整参数参考
 
-> 最后一次更新：2026-05-31  对应文件：`stable_audio_control/scripts/train_controlnet_dit.py`
+> 最后一次更新：2026-06-04  对应文件：`stable_audio_control/scripts/train_controlnet_dit.py`
 
 ---
 
@@ -56,10 +56,11 @@
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--ckpt-path` | `str` | `None` | 从指定 checkpoint 恢复训练（含 optimizer/scheduler 状态） |
+| `--ckpt-every-n-steps` | `int` | `8000` | 每 N 个 training step 自动保存一个 checkpoint |
 | `--ckpt-at-step` | `int` | `0` | 在指定 global_step 保存一个快照。`0` = 禁用 |
 | `--sigint-save` | `bool` | `true` | Ctrl+C 时自动保存 checkpoint 到 `{default_root_dir}/checkpoints/interrupted-step-{step}.ckpt` |
 
-> ModelCheckpoint 每 8000 步自动保存一次（`save_last=True`，`save_top_k=-1`）。
+> ModelCheckpoint 默认每 8000 步自动保存一次，可用 `--ckpt-every-n-steps` 修改；`save_last=True`，`save_top_k=-1`。
 
 ## 验证
 
@@ -86,6 +87,34 @@
 | `--melody-hidden-dim` | `int` | `256` | 卷积隐藏层维度 |
 | `--melody-conv-layers` | `int` | `2` | 卷积层数 |
 
+## Progressive Curriculum Masking
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--melody-mask` | `bool` | `false` | 是否启用论文式 progressive curriculum masking。只在训练 step 生效，验证/demo/推理不做训练遮罩 |
+| `--melody-full-mask-steps` | `int` | `0` | 训练初期全遮罩 melody token 的步数。正式 fresh run 建议至少覆盖第一个观察窗口 |
+| `--melody-mask-schedule-steps` | `int` | `10000` | full-mask 结束后，frame mask ratio 从 start 线性过渡到 end 的步数 |
+| `--melody-frame-mask-ratio-start` | `float` | `0.75` | schedule 起点的整帧遮罩比例 |
+| `--melody-frame-mask-ratio-end` | `float` | `0.10` | schedule 终点的整帧遮罩比例 |
+| `--melody-secondary-mask-prob` | `float` | `0.15` | full-mask 后，对 top-2/top-3/top-4 次级 CQT 通道随机置 0 的概率 |
+| `--melody-secondary-shuffle-prob` | `float` | `0.15` | full-mask 后，对 top-2/top-3/top-4 次级 CQT 通道沿时间打乱的概率 |
+
+### Masking 参数解读
+
+这组参数对应论文里的 progressive curriculum masking，目的不是“让 melody 更弱”，而是避免模型把完整 CQT 当作重建捷径。推荐正式 fresh run 使用：
+
+```bash
+--melody-mask true \
+--melody-full-mask-steps 8000 \
+--melody-mask-schedule-steps 120000 \
+--melody-frame-mask-ratio-start 0.75 \
+--melody-frame-mask-ratio-end 0.10 \
+--melody-secondary-mask-prob 0.15 \
+--melody-secondary-shuffle-prob 0.15
+```
+
+其中 `top-1` 左右声道 pitch 通道在 full-mask 结束后会保留，随机 mask/shuffle 主要作用于 top-2 到 top-4 的次级 pitch 通道。
+
 ## Demo 生成（训练中诊断）
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -93,10 +122,12 @@
 | `--demo-every` | `int` | `0` | 每 N 步生成 demo。`0` = 禁用 |
 | `--demo-steps` | `int` | `100` | Demo 采样步数。越少越快，越多质量越好 |
 | `--demo-cfg-scales` | `str` | `"3,6,9"` | 逗号分隔的 CFG scale 值。如 `"7"` 或 `"5,7,9"` |
-| `--demo-control-scales` | `str` | `"0,0.1,0.3,0.6,1.0"` | 逗号分隔的 control_scale 值。生成 `N_cfg × N_control × N_variants` 个样本 |
-| `--demo-control-variants` | `str` | `"correct,shuffled, zero"` | 逗号分隔的对照类型。`correct`=正确旋律，`shuffled`=错位/反转旋律，`zero`=全零旋律 |
+| `--demo-control-scales` | `str` | `"0,0.1,0.3,0.6,1"` | 逗号分隔的 control_scale 值。生成 `N_cfg × N_control × N_variants` 个样本 |
+| `--demo-control-variants` | `str` | `"correct,shuffled,zero"` | 逗号分隔的对照类型。`correct`=正确旋律，`shuffled`=错位/反转旋律，`zero`=全零旋律 |
 | `--demo-control-audio` | `str` | `None` | 固定音频文件作为控制源。`None` = 用当前 batch 的音频 |
 | `--demo-prompt` | `str` | `None` | 固定文本 prompt。`None` = 用当前 batch 的 metadata prompt |
+| `--demo-melody-similarity` | `bool` | `true` | Demo 生成时是否即时计算生成音频与参考/control 音频的旋律相似度 |
+| `--demo-melody-similarity-csv` | `str` | `demo_melody_similarity.csv` | Demo melody similarity CSV 文件名。相对路径会写到 `--default-root-dir` 下 |
 
 ### Demo 参数解读
 
@@ -110,10 +141,29 @@ Demo 生成的总样本数 = `len(demo_cfg_scales) × len(demo_control_scales) �
 ```
 → 每轮 demo 生成 `1 × 3 × 3 = 9` 个 wav 文件。
 
+`--demo-melody-similarity true` 时，每条 demo 生成后会立即用内存中的 reference/control audio 与 generated audio 计算轻量 CQT 指标，并追加到：
+
+```text
+{default_root_dir}/demo_melody_similarity.csv
+```
+
+CSV 主要字段：
+
+| 字段 | 说明 |
+|------|------|
+| `step` | 当前 global step |
+| `cfg_scale` | 本条 demo 使用的 CFG scale |
+| `control_scale` | 本条 demo 使用的 control scale |
+| `variant` | `correct`、`shuffled` 或 `zero` |
+| `cqt_top1_score` | 参考与生成音频 top-1 CQT pitch token 的 frame-wise accuracy |
+| `cqt_topk_score` | 参考与生成音频 top-k CQT pitch overlap rate |
+| `skipped_reason` | 跳过评分原因。`zero` variant 没有有效参考旋律，会记录为 skip |
+
 **诊断标准**：
 - `correct` 有明显旋律跟随，`zero` 没有 → ControlNet 在工作
 - `correct` 和 `shuffled` 旋律明显不同 → 模型在"听"控制，不是盲加残差
 - 三个 variant 没区别 → 控制分支未学会听从控制信号
+- `correct` 的 `cqt_top1_score` 明显高于 `shuffled`，且 `control_scale=1` 高于 `control_scale=0` → 旋律控制在可测指标上成立
 
 ## 旋律特征：CQT
 
@@ -167,17 +217,24 @@ python3 stable_audio_control/scripts/train_controlnet_dit.py \
     --dataset-config data/dataset_config_train.json \
     --seconds-total 10 \
     --batch-size 4 \
-    --num-control-layers 8 \
+    --num-control-layers 12 \
     --learning-rate 5e-5 \
     --max-steps 50000 \
-    --demo-every 2000 \
-    --demo-cfg-scales "7" \
-    --demo-control-scales "0,0.6,1.0" \
+    --demo-every 8000 \
+    --demo-cfg-scales "5" \
+    --demo-control-scales "0,0.1,0.3,0.6,1.0" \
     --demo-control-variants "correct,shuffled,zero" \
-    --demo-steps 100 \
+    --demo-steps 30 \
+    --melody-mask true \
+    --melody-full-mask-steps 8000 \
+    --melody-mask-schedule-steps 120000 \
+    --melody-frame-mask-ratio-start 0.75 \
+    --melody-frame-mask-ratio-end 0.10 \
+    --melody-secondary-mask-prob 0.15 \
+    --melody-secondary-shuffle-prob 0.15 \
     --precision bf16-mixed \
     --default-root-dir outputs/formal_training \
-    --ckpt-at-step 5000
+    --ckpt-every-n-steps 8000
 ```
 
 ### 从断点恢复

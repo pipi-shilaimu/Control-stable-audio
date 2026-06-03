@@ -13,11 +13,17 @@ Usage:
         --num-control-layers 12 \
         --seconds-total 10 \
         --steps 100
+        --demo-control-variants "correct/zero/shuffle"
+
+When multiple variants are requested, the script generates every
+seed × variant combination and appends the variant name to filenames unless
+the output template already contains `{variant}`.
 """
 from __future__ import annotations
 
 import argparse
 import gc
+import re
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +49,99 @@ from stable_audio_tools.models.diffusion import ConditionedDiffusionModelWrapper
 install_torchaudio_load_fallback()
 
 
+DEFAULT_DEMO_CONTROL_VARIANTS = ["correct"]
+_CONTROL_VARIANT_ALIASES = {
+    "correct": "correct",
+    "zero": "zero",
+    "shuffle": "shuffled",
+    "shuffled": "shuffled",
+}
+
+
+def _normalize_control_variant(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in _CONTROL_VARIANT_ALIASES:
+        expected = ", ".join(sorted(_CONTROL_VARIANT_ALIASES))
+        raise ValueError(f"Unknown control variant: {value}. Expected one of: {expected}.")
+    return _CONTROL_VARIANT_ALIASES[normalized]
+
+
+def parse_demo_control_variants(value: str) -> list[str]:
+    """Parse demo control variants from comma or slash separated CLI text."""
+
+    parts = [part.strip() for part in re.split(r"[,/]+", value) if part.strip()]
+    if not parts:
+        raise ValueError("--demo-control-variants must contain at least one variant.")
+
+    variants: list[str] = []
+    for part in parts:
+        variant = _normalize_control_variant(part)
+        if variant not in variants:
+            variants.append(variant)
+    return variants
+
+
+def make_control_variant_audio(reference_audio: torch.Tensor, variant: str) -> torch.Tensor:
+    """Return the reference audio used to extract the requested diagnostic control."""
+
+    variant = _normalize_control_variant(variant)
+    if variant == "correct":
+        return reference_audio
+    if variant == "zero":
+        return torch.zeros_like(reference_audio)
+    if variant == "shuffled":
+        return torch.flip(reference_audio, dims=[-1])
+    raise AssertionError(f"Unhandled normalized control variant: {variant}")
+
+
+def format_output_name(
+    template: str,
+    *,
+    i: int,
+    seed: int,
+    variant: str,
+    include_variant: bool,
+) -> str:
+    """Format output filename, adding a variant suffix when needed to avoid overwrites."""
+
+    filename = template.format(i=i, seed=seed, variant=variant)
+    if include_variant and "{variant" not in template:
+        path = Path(filename)
+        filename = str(path.with_name(f"{path.stem}_{variant}{path.suffix}"))
+    return filename
+
+
+def describe_inference_policy(checkpoint_load: dict[str, Any]) -> list[str]:
+    """Return human-readable diagnostics for ControlNet inference policy."""
+
+    notes: list[str] = []
+    if checkpoint_load.get("use_ema"):
+        ema_missing_keys = len(checkpoint_load.get("ema_missing_keys", []))
+        ema_unexpected_keys = len(checkpoint_load.get("ema_unexpected_keys", []))
+        notes.append(
+            "[ControlNetInference] prefer_ema=True overlays EMA model weights on the "
+            "online ControlConditionedDiffusionWrapper; treat this as a possible hybrid "
+            "path. If training demos follow melody but offline generation does not, rerun "
+            "the same command with --no-prefer-ema."
+        )
+        notes.append(
+            "[ControlNetInference] EMA overlay load diagnostics: "
+            f"ema_missing_keys={ema_missing_keys}, ema_unexpected_keys={ema_unexpected_keys}."
+        )
+    else:
+        notes.append(
+            "[ControlNetInference] EMA overlay is disabled or unavailable; using online "
+            "ControlConditionedDiffusionWrapper weights."
+        )
+
+    notes.append(
+        "[ControlNetInference] CFG policy: text CFG may use conditional/unconditional "
+        "branches, but melody control stays enabled in both branches. Use --control-scale 0 "
+        "to explicitly disable melody control."
+    )
+    return notes
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Batch generate ControlNet outputs with different seeds.")
     p.add_argument("--ckpt-path", type=str, required=True)
@@ -66,6 +165,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-control-layers", type=int, default=12)
     p.add_argument("--control-id", type=str, default="melody_control")
     p.add_argument("--control-scale", type=float, default=1.0)
+    p.add_argument(
+        "--demo-control-variants",
+        type=str,
+        default=",".join(DEFAULT_DEMO_CONTROL_VARIANTS),
+        help=(
+            "Control diagnostic variants to generate. Accepts comma or slash separators. "
+            "Supported: correct, zero, shuffle/shuffled. Example: correct/zero/shuffle."
+        ),
+    )
     p.add_argument("--prefer-ema", type=bool, default=True, action=argparse.BooleanOptionalAction)
 
     p.add_argument("--melody-feature", type=str, choices=["cqt", "chromagram"], default="cqt")
@@ -129,10 +237,16 @@ def main():
 
     checkpoint_load = load_control_checkpoint(control_model, args.ckpt_path, prefer_ema=bool(args.prefer_ema))
     print(f"Checkpoint loaded: use_ema={checkpoint_load['use_ema']}")
+    for note in describe_inference_policy(checkpoint_load):
+        print(note)
 
     control_model = control_model.to(device).eval().requires_grad_(False)
     if args.model_half and device.type != "cpu":
         control_model = control_model.to(torch.float16)
+
+    control_variants = parse_demo_control_variants(args.demo_control_variants)
+    include_variant_in_name = control_variants != ["correct"]
+    print(f"control_variants={control_variants}")
 
     # --- Extract melody once ---
     reference_audio = load_reference_audio(args.reference_audio, target_sample_rate=sample_rate,
@@ -144,20 +258,24 @@ def main():
         hop_length=int(args.hop_length), top_k=int(args.top_k),
         cqt_backend=args.cqt_backend, chroma_bins=int(args.chroma_bins), chroma_n_fft=int(args.chroma_n_fft),
     )
-    melody_control = extractor.extract(reference_audio).to(device=device)
 
     latent_sample_size = sample_size
     if control_model.pretransform is not None:
         latent_sample_size = sample_size // int(control_model.pretransform.downsampling_ratio)
 
-    control_input = control_model._extract_control_input(
-        cond={args.control_id: [melody_control, None]},
-        target_len=int(latent_sample_size),
-        dtype=next(control_model.model.parameters()).dtype,
-        device=device,
-    )
-    if control_input is None:
-        raise RuntimeError("Failed to build control_input.")
+    control_inputs: dict[str, torch.Tensor] = {}
+    for variant in control_variants:
+        variant_audio = make_control_variant_audio(reference_audio, variant)
+        melody_control = extractor.extract(variant_audio).to(device=device)
+        control_input = control_model._extract_control_input(
+            cond={args.control_id: [melody_control, None]},
+            target_len=int(latent_sample_size),
+            dtype=next(control_model.model.parameters()).dtype,
+            device=device,
+        )
+        if control_input is None:
+            raise RuntimeError(f"Failed to build control_input for variant={variant}.")
+        control_inputs[variant] = control_input
 
     conditioning = control_model.conditioner(
         [{"prompt": args.prompt, "seconds_start": float(args.seconds_start), "seconds_total": float(args.seconds_total)}],
@@ -165,38 +283,47 @@ def main():
     )
 
     # --- Batch generate ---
-    extra_sampler_kwargs = {
-        "control_input": control_input,
-        "control_scale": float(args.control_scale),
-    }
-
+    total_outputs = int(args.num_samples) * len(control_variants)
+    output_index = 0
     for i in range(args.num_samples):
         seed = int(args.seed_start) + i
-        filename = args.output_name.format(i=i, seed=seed)
-        output_path = output_dir / filename
-        print(f"[{i + 1}/{args.num_samples}] seed={seed} -> {output_path}")
+        for variant in control_variants:
+            output_index += 1
+            filename = format_output_name(
+                args.output_name,
+                i=i,
+                seed=seed,
+                variant=variant,
+                include_variant=include_variant_in_name,
+            )
+            output_path = output_dir / filename
+            print(f"[{output_index}/{total_outputs}] seed={seed} variant={variant} -> {output_path}")
 
-        audio = generate_diffusion_cond(
-            control_model,
-            steps=int(args.steps),
-            cfg_scale=float(args.cfg_scale),
-            conditioning_tensors=conditioning,
-            batch_size=1,
-            sample_size=int(sample_size),
-            seed=seed,
-            device=device,
-            sampler_type=args.sampler_type,
-            sigma_min=float(args.sigma_min),
-            sigma_max=float(args.sigma_max),
-            **extra_sampler_kwargs,
-        )
-        save_audio_tensor(output_path, audio, sample_rate)
+            extra_sampler_kwargs = {
+                "control_input": control_inputs[variant],
+                "control_scale": float(args.control_scale),
+            }
+            audio = generate_diffusion_cond(
+                control_model,
+                steps=int(args.steps),
+                cfg_scale=float(args.cfg_scale),
+                conditioning_tensors=conditioning,
+                batch_size=1,
+                sample_size=int(sample_size),
+                seed=seed,
+                device=device,
+                sampler_type=args.sampler_type,
+                sigma_min=float(args.sigma_min),
+                sigma_max=float(args.sigma_max),
+                **extra_sampler_kwargs,
+            )
+            save_audio_tensor(output_path, audio, sample_rate)
 
-        # Free GPU memory between samples
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Free GPU memory between samples
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    print(f"Done: {args.num_samples} samples -> {output_dir}")
+    print(f"Done: {args.num_samples} seeds x {len(control_variants)} variants = {total_outputs} outputs -> {output_dir}")
 
 
 if __name__ == "__main__":

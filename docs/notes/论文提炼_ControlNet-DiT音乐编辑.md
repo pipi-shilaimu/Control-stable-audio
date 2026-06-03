@@ -1,6 +1,6 @@
 # 论文提炼：Editing Music with Melody and Text
 
-更新日期：2026-04-27
+更新日期：2026-06-03
 
 本文档整理根目录论文 [Editing music with melody and text_using controlnet for diffusion transformer.pdf](<Editing music with melody and text_using controlnet for diffusion transformer.pdf>) 的核心内容，并结合当前仓库实现状态，提炼出项目还要完成的点、已经完成的点、整体思路与关键机制。
 
@@ -332,72 +332,61 @@ top-k CQT index c, values in 1..128
 
 这说明当前工程接线、zero-init 行为、冻结策略和最小训练闭环都已经验证过。
 
-## 7. 当前仓库尚未完成的点
+## 7. 当前仓库仍需补齐的论文关键点
 
-### 7.1 Progressive curriculum masking 未实现
+本节已按 2026-06-02 的本地代码状态更新。旧版文档中部分“未实现”判断已经过时：`conditioner.py` 已存在，`--num-control-layers` 默认已是 12，训练长度修正和 demo sweep 已经完成，离线 batch 推理脚本也已经支持 control variants。
 
-计划文件要求新增：
+### 7.1 Progressive curriculum masking 已实现
 
-- `stable_audio_control/melody/masking.py`
-- `tests/test_masking.py`
+当前仓库已新增 `stable_audio_control/melody/masking.py`，并把训练期 progressive curriculum masking 接入 `MelodyControlAugmenter`。已覆盖：
 
-当前这两个文件不存在。后续需要实现：
-
-- frame-wise masking
-- pitch-wise masking
-- 初期 full-mask phase
-- mask ratio 随训练推进逐步降低但保留随机性
-- top-1 保留
+- early full-mask phase
+- frame-wise mask ratio schedule
+- full-mask 后 top-1 保留
 - top-2/top-3/top-4 随机遮罩和 shuffle
-- 可复现的 `torch.Generator` 或 seed
-- 训练启用、推理关闭
+- 训练启用，验证/推理关闭
 
-这是论文平衡文本和旋律控制的关键机制，应优先补齐。
+这是论文平衡文本控制和旋律控制的关键机制。后续正式训练应使用 `--melody-mask true`，并在日志里确认 full-mask steps、schedule steps 与 mask ratios。
 
-### 7.2 论文版 melody conditioner 未实现
+### 7.2 CQT padding mask 归零已实现
 
-计划文件要求新增：
+`CQTTopKExtractor` 会把真实 pitch index 变成 `1..128`，`0` 只保留给 mask/pad。问题是静音或 padding 区域并不会天然输出 `0`，top-k 仍可能选出低频伪 pitch token。
 
-- `stable_audio_control/melody/conditioner.py`
+当前训练链路已把 data utils 里的 waveform-level `padding_mask` 对齐到 CQT 帧率，并在进入 `MelodyControlEncoder` 前把 padded frames 置为 `0`。这比继续调 control scale 更基础，因为它直接决定模型看到的是“无旋律”还是“伪旋律”。
 
-当前还没有 `Embedding + Conv1D downsample` 结构。现有 `control_projector` 是线性投影，能跑通控制链路，但还不完全等价于论文的 pitch-specific embedding 机制。
+### 7.3 MelodyControlEncoder 已实现，但需要 masked/padded 输入测试
 
-后续建议实现：
+旧判断“论文版 melody conditioner 未实现”已经不准确。当前 [stable_audio_control/melody/conditioner.py](stable_audio_control/melody/conditioner.py) 已经实现：
 
 ```text
-input: LongTensor [B, 8, F], values 0..128
+top-k CQT LongTensor [B, 8, F], values 0..128
   -> nn.Embedding(129, E, padding_idx=0)
-  -> reshape / merge top-k and channel dimensions
+  -> merge channel and embedding dimensions
   -> Conv1D stack
-  -> interpolate or stride-align to target latent length
-  -> output [B, C_control, L_latent] or [B, L_latent, dim_in]
+  -> interpolate to target latent length
+  -> output [B, L, dim_in]
 ```
 
-### 7.3 正式推理入口未实现
+剩余风险不是“没有 conditioner”，而是需要补测试和训练链路验证：
 
-计划文件要求新增：
+- `padding_idx=0` 在 full-mask / padding-mask 输入下是否稳定。
+- CQT padded frames 是否真的先被置为 `0`。
+- dtype/device/target length 对齐是否覆盖。
+- 完全空旋律输入是否不会产生异常或伪控制。
 
-- `stable_audio_control/scripts/generate_melody_edit.py`
+### 7.4 推理入口已存在，EMA/CFG 诊断已补齐
 
-当前还没有面向 melody + text editing 的 CLI。后续需要支持：
+旧判断“正式推理入口未实现”需要修正。当前已有：
 
-- `--prompt`
-- `--melody-wav`
-- `--seconds-total`
-- `--seed`
-- `--steps`
-- `--cfg-scale`
-- `--control-scale`
-- checkpoint 加载
-- 输出 wav 保存
-- CFG 只作用于文本，旋律控制保持开启
+- `stable_audio_control/scripts/batch_generate_control.py`
+- `stable_audio_control/scripts/compare_controlnet_generation.py`
+- `stable_audio_control/scripts/compare_controlnet_generation_random.py`
 
-### 7.4 Dataset metadata / 缓存链路未实现
+真正需要优先处理的是训练 demo 与离线推理是否走同一类权重路径。训练 demo 使用 online `ControlConditionedDiffusionWrapper`；离线脚本默认 `prefer_ema=True`，可能出现 online melody/control routing 加 EMA DiT/ControlNet 权重的 hybrid。`batch_generate_control.py` 现在会打印 EMA overlay 诊断、`ema_missing_keys` / `ema_unexpected_keys` 数量，并在使用 EMA 时提示第一步应跑 `--no-prefer-ema`，而不是直接怀疑训练完全失败。
 
-计划文件要求新增：
+CFG 策略也已在离线 batch inference 日志中明确：文本 CFG 可以走 conditional/unconditional 分支，但 melody control 应保持常开；显式关闭控制应使用 `control_scale=0`。
 
-- `stable_audio_control/data/custom_metadata.py`
-- 可选 dataset config
+### 7.5 Dataset metadata / CQT 缓存仍是中期工程项
 
 当前训练脚本在线从 batch waveform 提取 CQT。这个方式适合 smoke 或小规模验证，但正式训练会有性能压力，尤其在没有 `nnAudio` 的情况下会走 `librosa` CPU 路径。
 
@@ -408,98 +397,97 @@ input: LongTensor [B, 8, F], values 0..128
 - 明确缓存与 random crop、seconds_start、sample_rate 的关系。
 - 避免 pre-encoded latent 模式下丢失 waveform 导致无法提取 melody。
 
-### 7.5 训练配置还未完全对齐论文
+这项重要，但不应排在 progressive masking 和 padding mask 前面。
 
-论文设置是 ControlNet 克隆 12 层，即 24 层 DiT 的一半。当前训练脚本默认：
+### 7.6 训练配置大体对齐，剩余是 scheduler/EMA/日志细节
 
-```text
---num-control-layers 2
-```
-
-这更像省资源 smoke 默认。正式复现实验应改为：
+论文设置是 ControlNet 克隆 12 层，即 24 层 DiT 的一半。当前训练脚本默认已经是：
 
 ```text
 --num-control-layers 12
 ```
 
-还需要确认：
+训练长度也已经支持 `--seconds-total 10`，避免 10 秒数据被 47.55 秒 StableAudio 默认 sample size 污染。
 
-- AdamW 是否按论文设置使用。
-- learning rate 是否为 `5e-5`。
-- InverseLR scheduler `power=0.5` 是否真实配置。
-- batch size、梯度累积、precision 与硬件能力是否匹配。
-- EMA 是否与训练/导出流程兼容。
+剩余需要确认：
 
-### 7.6 评测与消融未实现
+- AdamW / InverseLR 是否完全按论文配置生效。
+- learning rate 默认和正式训练命令是否使用 `5e-5`。
+- EMA 是否与训练 demo / 离线推理一致。
+- 日志是否记录 effective sample size、mask ratio、control variants、EMA 使用状态。
 
-论文评估和消融目前还没有仓库脚本对应。后续需要补：
+### 7.7 评测与消融已有最小闭环，重指标后移
 
-- melody accuracy
-- FDopenl3
-- KLpasst
-- CLAP score
-- subjective MOS 流程或至少本地试听评测表
-- MusicGen baseline 对比
-- cross-attention injection ablation
-- without masking strategy ablation
-- text-to-music 和 music editing 双任务评估
+论文完整评估包括 melody accuracy、FDopenl3、KLpasst、CLAP、主观 MOS。Phase 1 已补两条轻量评估路径：训练 demo 生成时即时写 `demo_melody_similarity.csv`，以及事后用 `evaluate_control_variants.py` 扫描 `correct/shuffled/zero` 生成结果并输出 `melody_control_report.csv`。它们能回答：
 
-### 7.7 测试覆盖不足
+- `correct` 是否比 `shuffled` / `zero` 更接近参考旋律。
+- `control_scale` 增大是否提高旋律跟随，而不是只让输出变平。
+- `--prefer-ema` 与 `--no-prefer-ema` 的离线推理是否行为不同。
 
-当前只有 [tests/test_train_controlnet_dit.py](tests/test_train_controlnet_dit.py)，主要检查训练脚本参数默认值。后续建议新增：
+当前轻量指标基于 CQT top-k overlap 与 top-1 pitch accuracy，不声称复现完整论文评估。重指标和 MusicGen baseline 可以放到 Phase 3。
 
-- `tests/test_cqt_topk.py`
-- `tests/test_masking.py`
-- `tests/test_melody_conditioner.py`
-- `tests/test_control_transformer_shapes.py`
-- `tests/test_control_dit_wrapper.py`
+最小用法示例：
 
-重点覆盖：
+训练 demo 即时评分默认开启；如需显式指定 CSV：
 
-- CQT 输出 shape、dtype、值域 `1..128`
-- mask 后是否出现 `0`
-- top-1 是否保留
-- control input batch/length/dtype/device 对齐
-- CFG batch `B -> 2B` 是否正确
-- zero-init 输出差异是否为 0
-- 扰动 zero-linear 后控制路径是否非零
-- 冻结参数是否无梯度
+```bash
+python3 stable_audio_control/scripts/train_controlnet_dit.py \
+  ... \
+  --demo-every 8000 \
+  --demo-melody-similarity true \
+  --demo-melody-similarity-csv demo_melody_similarity.csv
+```
 
-## 8. 建议推进顺序
+训练时会在 `<default-root-dir>/demo_melody_similarity.csv` 追加每个 demo 的 `cfg_scale`、`control_scale`、`variant`、`cqt_top1_score`、`cqt_topk_score` 等字段。`zero` variant 没有有效参考旋律，会被记录为 skip，不参与 top-1 判断。
 
-### 阶段 1：补齐论文关键训练机制
+事后扫描已生成 WAV：
 
-1. 新增 `stable_audio_control/melody/masking.py`。
-2. 新增 `tests/test_masking.py`。
-3. 新增 `stable_audio_control/melody/conditioner.py`。
-4. 将 `train_controlnet_dit.py` 的 `MelodyControlAugmenter` 改为使用 conditioner + masking。
-5. 确保 masking 只在训练时启用，验证/推理关闭。
+```bash
+python3 stable_audio_control/scripts/evaluate_control_variants.py \
+  --reference-audio audios/Then.mp3 \
+  --generated-dir outputs/debug_infer_no_ema \
+  --seconds-total 10 \
+  --melody-feature cqt \
+  --cqt-backend auto \
+  --output-csv outputs/debug_infer_no_ema/melody_control_report.csv
+```
 
-### 阶段 2：加强训练可用性
+判读方式：如果同一 seed / control_scale 下 `correct` 的 top-1 accuracy 明显高于 `shuffled` 和 `zero`，说明 melody control 至少在推理输出中留下了可测信号；如果三者接近，优先检查 checkpoint、EMA 路径、control scale 与 demo/inference 是否同配置。
 
-1. 明确正式训练配置，尤其 `num_control_layers=12`。
-2. 对齐 AdamW、`lr=5e-5`、InverseLR `power=0.5`。
-3. 支持 `nnAudio` 或 CQT 缓存。
-4. 增加训练日志中的 trainable 参数统计、control scale、mask ratio。
-5. 小数据集跑短步数，确认 loss、梯度和导出正常。
+## 8. 当前建议推进顺序
 
-### 阶段 3：补推理闭环
+### Phase 1：论文关键训练机制补齐（最高优先级）
 
-1. 新增 `generate_melody_edit.py`。
-2. 输入 melody wav，提取 top-k CQT。
-3. 加载训练 checkpoint。
-4. 用文本 prompt + melody control 生成音频。
-5. 确保 CFG 只作用于文本。
-6. 保存 output wav 和可选中间控制图。
+1. 已新增 `stable_audio_control/melody/masking.py`。
+2. 已新增 `tests/test_melody_masking.py`。
+3. 已实现 progressive curriculum masking。
+4. 已实现 CQT padding mask 归零。
+5. 已将 masking/padding zeroing 接入 `MelodyControlAugmenter`，并确保只在训练启用课程遮罩。
+6. 已补 inference EMA/CFG 诊断说明和测试。
+7. 已补轻量 melody-control evaluation gate。
 
-### 阶段 4：补评测与消融
+### Phase 2：正式训练验证 / ControlNet 训练恢复
 
-1. 实现 melody accuracy。
+1. 容器同步代码，确认 `--seconds-total`、`--demo-control-variants`、`--demo-prompt`、`--melody-mask` 都存在。
+2. 跑 `--seconds-total 10 --max-steps 1 --demo-every 0` smoke。
+3. 跑 2000-4000 step fresh training。
+4. 听并评估 `correct/shuffled/zero` demo。
+5. 若训练 demo 有旋律但离线推理没有，优先跑 `--no-prefer-ema`。
+
+### Phase 3：论文级评测与实验管理
+
+1. 扩展 melody accuracy。
 2. 接 CLAP score。
 3. 视资源补 FDopenl3 / KLpasst。
 4. 准备 MusicGen baseline。
-5. 做三组消融：ours、without masking、cross-attention injection。
-6. 整理评测报告。
+5. 做 masking / no masking / cross-attention 或其他结构消融。
+6. 整理评测报告和实验追踪。
+
+### Phase 4：工程整理与新特征探索
+
+1. 整理硬编码和配置入口。
+2. 支持 CQT 缓存。
+3. 新增 pitch contour / HPSS 等 melody control 特征。
 
 ## 9. 简化版任务清单
 
@@ -509,19 +497,21 @@ input: LongTensor [B, 8, F], values 0..128
 | P0 | ControlNet-DiT 注入 | 已完成 | `control_transformer.py` 已实现 |
 | P0 | wrapper 接入 StableAudio | 已完成 | `control_dit.py` 已实现 |
 | P0 | top-k CQT 提取 | 已完成 | `cqt_topk.py` 已实现 |
-| P0 | 最小训练 smoke | 已完成 | 报告结论为 Go |
-| P0 | progressive masking | 未完成 | 论文关键机制，建议下一步优先做 |
-| P0 | melody embedding + Conv conditioner | 未完成 | 当前只有 LazyLinear projector |
-| P1 | 正式推理 CLI | 未完成 | 需要 `generate_melody_edit.py` |
-| P1 | dataset metadata / CQT 缓存 | 未完成 | 正式训练性能需要 |
-| P1 | 训练配置对齐论文 | 部分完成 | 默认 control layers 仍是 2，正式应设 12 |
-| P2 | 评测指标与 baseline | 未完成 | 论文结果复现必需 |
-| P2 | 消融实验 | 未完成 | masking/cross-attention 结论需要验证 |
-| P2 | 测试覆盖 | 部分完成 | 当前只有训练脚本参数测试 |
+| P0 | melody embedding + Conv conditioner | 已完成基础实现 | `conditioner.py` 已存在，剩余 masked/padded 输入测试 |
+| P0 | 12 层 ControlNet 默认 | 已完成 | `--num-control-layers` 默认已是 12 |
+| P0 | 训练长度修正 | 已完成 | `--seconds-total` / `--sample-size` |
+| P0 | demo control sweep | 已完成 | `correct/shuffled/zero` + control scales + fixed prompt |
+| P0 | batch inference variants | 已完成 | `--demo-control-variants "correct/zero/shuffle"` |
+| P0 | progressive masking | 已完成 | Phase 1 第一优先级 |
+| P0 | CQT padding mask 归零 | 已完成 | Phase 1 第一优先级 |
+| P0 | EMA/CFG 推理策略诊断 | 已完成 | 解释 demo 好但离线推理差的优先排查项 |
+| P1 | 轻量 melody-control evaluation | 已完成 | 用于 Phase 2 训练判定 |
+| P2 | CQT 缓存 / dataset metadata | 未完成 | 性能与规模化训练需要 |
+| P2 | 论文重评测与 baseline | 未完成 | CLAP/FD/KL/MusicGen |
 
 ## 10. 最短技术路线
 
-如果目标是尽快把仓库推进到“接近论文实现”的状态，建议按下面路线做：
+如果目标是尽快把仓库推进到“更接近论文且能解释训练失败”的状态，建议按下面路线做：
 
 ```text
 当前已完成：
@@ -529,17 +519,26 @@ StableAudio Open
   + ControlNetContinuousTransformer
   + ControlConditionedDiffusionWrapper
   + top-k CQT extractor
-  + smoke train
+  + MelodyControlEncoder
+  + 12-layer ControlNet default
+  + 10-second effective training length
+  + correct/shuffled/zero demo diagnostics
 
-下一步：
+Phase 1 立即补：
 top-k CQT index [B, 8, F]
-  -> progressive masking
-  -> pitch embedding + Conv1D conditioner
+  -> padding_mask 对齐到 CQT 帧并置 0
+  -> progressive curriculum masking
+  -> MelodyControlEncoder
   -> control_input [B, L, dim_in]
-  -> 12-layer ControlNet branch
-  -> formal training
-  -> melody + text inference CLI
-  -> evaluation
+  -> ControlNet branch
+  -> training demo / offline inference EMA diagnostic
+  -> lightweight melody-control metric
+
+Phase 2 再训练：
+fresh 10s training
+  -> correct/shuffled/zero demo
+  -> no-EMA offline inference comparison
+  -> decide whether需要更大架构 ablation
 ```
 
-一句话总结：当前仓库已经把 ControlNet-DiT 的“骨架”和“接线”搭起来了；真正决定论文效果的下一块，是把旋律提示从简单线性投影升级为“top-k CQT + 课程遮罩 + embedding/Conv latent conditioner”，并补齐推理和评测闭环。
+一句话总结：当前仓库已经不只是“骨架和接线”，而是已经具备了可训练链路、论文式离散 melody conditioner、训练长度修正、demo 消融、progressive masking、padding-safe CQT、EMA/CFG 推理诊断和轻量 melody-control 评估。现在 Phase 1 剩余重点是补强 `MelodyControlEncoder` 在全 0 mask、padding 与静音输入下的边界测试；随后进入 fresh 10s diagnostic training，用 `correct/shuffled/zero` 与 `--no-prefer-ema` 对照判断控制分支是否真的工作。

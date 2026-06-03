@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 import sys
 import types
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import torch
 
@@ -80,6 +82,8 @@ def _load_callback_module():
     saved_modules = {name: sys.modules.get(name) for name in _STUB_MODULE_NAMES}
     _install_import_stubs()
     repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
     module_path = repo_root / "stable_audio_control" / "inference" / "control_demo_callback.py"
     spec = importlib.util.spec_from_file_location("control_demo_callback", module_path)
     if spec is None or spec.loader is None:
@@ -232,6 +236,7 @@ class ControlDemoCallbackTests(unittest.TestCase):
             control_scales=[1.0],
             control_variants=["correct"],
             demo_control_audio_path="melody.wav",
+            demo_melody_similarity=False,
         )
 
         callback.on_train_batch_end(trainer, module_under_test, None, (batch_reals, metadata), 0)
@@ -298,6 +303,7 @@ class ControlDemoCallbackTests(unittest.TestCase):
             demo_cfg_scales=[3],
             control_scales=[0.0, 0.3],
             control_variants=["correct", "zero"],
+            demo_melody_similarity=False,
         )
 
         callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
@@ -367,6 +373,7 @@ class ControlDemoCallbackTests(unittest.TestCase):
             demo_cfg_scales=[3],
             control_scales=[1.0],
             control_variants=["correct"],
+            demo_melody_similarity=False,
         )
 
         callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
@@ -417,12 +424,108 @@ class ControlDemoCallbackTests(unittest.TestCase):
             control_scales=[1.0],
             control_variants=["correct"],
             demo_prompt="fixed diagnostic prompt",
+            demo_melody_similarity=False,
         )
 
         callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
 
         self.assertEqual(seen_prompts, [["fixed diagnostic prompt", "fixed diagnostic prompt"]])
         self.assertEqual(metadata, [{"prompt": "batch prompt a"}, {"prompt": "batch prompt b"}])
+
+    def test_train_batch_end_scores_demo_melody_similarity_to_csv_and_logger(self) -> None:
+        module = _load_callback_module()
+        compare_calls = []
+        logged_metrics = []
+
+        def fake_compare_audio_tensors_melody_similarity(reference_audio, generated_audio, **kwargs):
+            compare_calls.append((reference_audio.clone(), generated_audio.clone(), kwargs))
+            return {
+                "similarity": {
+                    "metric_name": "cqt_topk_pitch_overlap_rate",
+                    "score": 0.5,
+                    "matched_tokens": 2,
+                    "total_tokens": 4,
+                    "compared_frames": 3,
+                    "additional_metrics": {
+                        "cqt_top1_accuracy": {
+                            "metric_name": "cqt_top1_pitch_accuracy",
+                            "score": 0.75,
+                            "matched_tokens": 3,
+                            "total_tokens": 4,
+                            "compared_frames": 3,
+                        }
+                    },
+                }
+            }
+
+        module.compare_audio_tensors_melody_similarity = fake_compare_audio_tensors_melody_similarity
+        module.sample = lambda model, noise, steps, eta, **kwargs: noise + 1.0
+        module.sf.write = lambda *args, **kwargs: None
+        module.log_audio = lambda *args, **kwargs: None
+        module.log_image = lambda *args, **kwargs: None
+        module.audio_spectrogram_image = lambda audio: audio
+
+        class MelodyAugmenter:
+            extractor = object()
+
+            def set_batch_audio(self, audio: torch.Tensor) -> None:
+                pass
+
+        class Diffusion:
+            io_channels = 1
+            pretransform = None
+
+            def conditioner(self, cond, device):
+                return {"ok": True}
+
+        class Logger:
+            def log_metrics(self, metrics, step=None):
+                logged_metrics.append((metrics, step))
+
+        module_under_test = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            diffusion=Diffusion(),
+            melody_augmenter=MelodyAugmenter(),
+            eval=lambda: None,
+            train=lambda: None,
+        )
+        reals = torch.arange(1 * 1 * 6, dtype=torch.float32).reshape(1, 1, 6)
+        metadata = [{"prompt": "batch prompt"}]
+        callback = module.ControlNetDemoCallback(
+            demo_every=1,
+            num_demos=1,
+            sample_size=6,
+            sample_rate=44_100,
+            demo_cfg_scales=[3],
+            control_scales=[0.3],
+            control_variants=["correct"],
+            demo_melody_similarity=True,
+            demo_melody_similarity_csv="metrics.csv",
+            demo_melody_similarity_feature="cqt",
+            demo_melody_similarity_top_k=1,
+        )
+
+        with TemporaryDirectory() as tmp:
+            trainer = types.SimpleNamespace(global_step=1, default_root_dir=tmp, logger=Logger())
+            callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
+            with (Path(tmp) / "metrics.csv").open("r", encoding="utf-8", newline="") as fp:
+                rows = list(csv.DictReader(fp))
+
+        self.assertEqual(len(compare_calls), 1)
+        self.assertEqual(compare_calls[0][2]["feature"], "cqt")
+        self.assertEqual(compare_calls[0][2]["top_k"], 1)
+        self.assertEqual(compare_calls[0][2]["sample_size"], 6)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["step"], "1")
+        self.assertEqual(rows[0]["variant"], "correct")
+        self.assertEqual(rows[0]["control_scale"], "0.3")
+        self.assertEqual(rows[0]["cqt_top1_score"], "0.75")
+        self.assertEqual(rows[0]["cqt_topk_score"], "0.5")
+        self.assertEqual(logged_metrics[0][1], 1)
+        self.assertIn(
+            "demo_melody_similarity/cfg_3_control_0p3_correct/top1",
+            logged_metrics[0][0],
+        )
 
 
 if __name__ == "__main__":

@@ -27,6 +27,12 @@ from stable_audio_control.melody.extractors import (  # noqa: E402
     build_melody_extractor,
     melody_control_channels,
 )
+from stable_audio_control.melody.masking import (  # noqa: E402
+    MelodyMaskingConfig,
+    apply_progressive_melody_mask,
+    padding_masks_from_metadata,
+    zero_melody_frames_from_padding_mask,
+)
 from stable_audio_control.models import (  # noqa: E402
     ControlConditionedDiffusionWrapper,
     ControlNetContinuousTransformer,
@@ -59,7 +65,7 @@ class StepCheckpoint(pl.Callback):
         super().__init__()
         self.target_step = int(target_step)
         self._saved = False
-    
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         if not self._saved and trainer.global_step >= self.target_step:
             ckpt_dir = Path(trainer.default_root_dir) / "checkpoints"
@@ -252,6 +258,21 @@ def resolve_training_demo_count(*, batch_size: int) -> int:
     return 1
 
 
+def build_melody_masking_config(args: argparse.Namespace) -> MelodyMaskingConfig:
+    """Build the training-only melody masking config from parsed CLI args."""
+
+    return MelodyMaskingConfig(
+        enabled=bool(args.melody_mask),
+        full_mask_steps=int(args.melody_full_mask_steps),
+        schedule_steps=int(args.melody_mask_schedule_steps),
+        frame_mask_ratio_start=float(args.melody_frame_mask_ratio_start),
+        frame_mask_ratio_end=float(args.melody_frame_mask_ratio_end),
+        secondary_mask_prob=float(args.melody_secondary_mask_prob),
+        secondary_shuffle_prob=float(args.melody_secondary_shuffle_prob),
+        preserve_top1=True,
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train ControlNet-DiT on StableAudio Open with selectable melody control features."
@@ -333,6 +354,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--melody-hidden-dim", type=int, default=256)
     parser.add_argument("--melody-conv-layers", type=int, default=2)
     parser.add_argument(
+        "--melody-mask",
+        type=_str_to_bool,
+        default=False,
+        help="Enable paper-style progressive curriculum masking for CQT melody tokens during training only.",
+    )
+    parser.add_argument(
+        "--melody-full-mask-steps",
+        type=int,
+        default=0,
+        help="Number of initial training steps where all melody tokens are masked to 0.",
+    )
+    parser.add_argument(
+        "--melody-mask-schedule-steps",
+        type=int,
+        default=10000,
+        help="Steps after full-mask phase used to interpolate frame mask ratio.",
+    )
+    parser.add_argument(
+        "--melody-frame-mask-ratio-start",
+        type=float,
+        default=0.75,
+        help="Frame mask ratio at the start of the progressive schedule.",
+    )
+    parser.add_argument(
+        "--melody-frame-mask-ratio-end",
+        type=float,
+        default=0.10,
+        help="Frame mask ratio at the end of the progressive schedule.",
+    )
+    parser.add_argument(
+        "--melody-secondary-mask-prob",
+        type=float,
+        default=0.15,
+        help="Probability of masking secondary top-k CQT channels after the full-mask phase.",
+    )
+    parser.add_argument(
+        "--melody-secondary-shuffle-prob",
+        type=float,
+        default=0.15,
+        help="Probability of shuffling secondary top-k CQT channels over time after the full-mask phase.",
+    )
+    parser.add_argument(
         "--deterministic-encode",
         type=_str_to_bool,
         default=False,
@@ -379,6 +442,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional fixed text prompt for demo generation. Defaults to each batch metadata prompt.",
+    )
+    parser.add_argument(
+        "--demo-melody-similarity",
+        type=_str_to_bool,
+        default=True,
+        help="If True, score generated demo audio against its reference/control melody and append a CSV report.",
+    )
+    parser.add_argument(
+        "--demo-melody-similarity-csv",
+        type=str,
+        default="demo_melody_similarity.csv",
+        help="CSV path for demo melody similarity rows. Relative paths are resolved under --default-root-dir.",
     )
     length_group = parser.add_mutually_exclusive_group()
     length_group.add_argument(
@@ -494,6 +569,7 @@ class MelodyControlAugmenter(nn.Module):
         extractor: MelodyExtractor,
         control_channels: int,
         empty_dtype: torch.dtype,
+        melody_masking_config: Optional[MelodyMaskingConfig] = None,
     ) -> None:
         super().__init__()
         self.base_conditioner = base_conditioner
@@ -501,10 +577,17 @@ class MelodyControlAugmenter(nn.Module):
         self.extractor = extractor
         self.control_channels = int(control_channels)
         self.empty_dtype = empty_dtype
+        self.melody_masking_config = melody_masking_config or MelodyMaskingConfig()
         self._batch_audio: Optional[torch.Tensor] = None
+        self._masking_global_step = 0
+        self._masking_training = False
 
     def set_batch_audio(self, audio: torch.Tensor) -> None:
         self._batch_audio = audio.detach()
+
+    def set_training_context(self, *, global_step: int, training: bool) -> None:
+        self._masking_global_step = int(global_step)
+        self._masking_training = bool(training)
 
     @staticmethod
     def _ensure_stereo(audio: torch.Tensor) -> torch.Tensor:
@@ -539,10 +622,22 @@ class MelodyControlAugmenter(nn.Module):
 
         waveform = self._ensure_stereo(self._batch_audio.to(device=device, dtype=torch.float32))
         melody_control = self.extractor.extract(waveform).to(device=device)
+        melody_control = zero_melody_frames_from_padding_mask(
+            melody_control,
+            padding_mask=padding_masks_from_metadata(metadata),
+            audio_num_samples=waveform.shape[-1],
+        )
+        melody_control = apply_progressive_melody_mask(
+            melody_control,
+            global_step=self._masking_global_step,
+            config=self.melody_masking_config,
+            training=self._masking_training,
+        )
         conditioning[self.control_id] = [melody_control, None]
 
         # Clear stale reference to avoid accidental reuse.
         self._batch_audio = None
+        self._masking_training = False
         return conditioning
 
 
@@ -573,10 +668,18 @@ class MelodyAwareDiffusionCondTrainingWrapper(DiffusionCondTrainingWrapper):
         return reals, normalize_metadata_padding_masks(batch[1])
 
     def training_step(self, batch, batch_idx):
+        self.melody_augmenter.set_training_context(
+            global_step=int(self.global_step),
+            training=True,
+        )
         batch = self._prepare_batch(batch)
         return super().training_step(batch, batch_idx)
 
     def validation_step(self, batch, batch_idx):
+        self.melody_augmenter.set_training_context(
+            global_step=int(self.global_step),
+            training=False,
+        )
         batch = self._prepare_batch(batch)
         return super().validation_step(batch, batch_idx)
 
@@ -779,6 +882,7 @@ def main() -> None:
         seconds_total=args.seconds_total,
         sample_size=args.sample_size,
     )
+    melody_masking_config = build_melody_masking_config(args)
     model_dtype = next(control_model.parameters()).dtype
 
     extractor = build_melody_extractor(
@@ -801,6 +905,7 @@ def main() -> None:
         extractor=extractor,
         control_channels=control_channels,
         empty_dtype=torch.long if uses_discrete_melody else torch.float32,
+        melody_masking_config=melody_masking_config,
     )
     control_model.base_wrapper.conditioner = melody_augmenter
 
@@ -862,6 +967,10 @@ def main() -> None:
                 demo_control_audio_path=args.demo_control_audio,
                 demo_prompt=args.demo_prompt,
                 control_id=args.control_id,
+                demo_melody_similarity=bool(args.demo_melody_similarity),
+                demo_melody_similarity_csv=args.demo_melody_similarity_csv,
+                demo_melody_similarity_feature=args.melody_feature,
+                demo_melody_similarity_top_k=args.top_k,
             )
         )
     # 无论有无验证集，都按步数定时保存 checkpoint
@@ -923,8 +1032,8 @@ def main() -> None:
         print('  checkpoint_dir=' + str(Path(args.default_root_dir) / 'checkpoints'))
     else:
         print("Validation: disabled (no --val-dataset-config)")
-    
-    
+
+
     for oc in model_config.get("training", {}).get("optimizer_configs", {}).values():
         sc = oc.get("scheduler", {})
         if sc.get("config", {}).get("warmup") is not None:
@@ -971,6 +1080,15 @@ def main() -> None:
         f"({effective_sample_size.seconds_total:.4f}s, source={effective_sample_size.source})"
     )
     print(f"min_input_length={effective_sample_size.min_input_length}")
+    print(
+        "melody_masking="
+        f"enabled={melody_masking_config.enabled}, "
+        f"full_mask_steps={melody_masking_config.full_mask_steps}, "
+        f"schedule_steps={melody_masking_config.schedule_steps}, "
+        f"frame_ratio={melody_masking_config.frame_mask_ratio_start:g}->{melody_masking_config.frame_mask_ratio_end:g}, "
+        f"secondary_mask_prob={melody_masking_config.secondary_mask_prob:g}, "
+        f"secondary_shuffle_prob={melody_masking_config.secondary_shuffle_prob:g}"
+    )
     if args.demo_every > 0:
         print(f"demo_cfg_scales={parse_demo_cfg_scales(args.demo_cfg_scales)}")
         print(f"demo_steps={args.demo_steps}")
@@ -978,6 +1096,8 @@ def main() -> None:
         print(f"demo_control_variants={parse_demo_control_variants(args.demo_control_variants)}")
         print(f"demo_control_audio={args.demo_control_audio}")
         print(f"demo_prompt={args.demo_prompt}")
+        print(f"demo_melody_similarity={args.demo_melody_similarity}")
+        print(f"demo_melody_similarity_csv={args.demo_melody_similarity_csv}")
     print(f"trainable_modules={len(trainable_names)} tensors")
     print(f"trainable_name_samples={trainable_names[:6]}")
     #print(f"[DEBUG] single batch reals shape={single_data[0].shape}, metadata sample prompt={single_data[1][0].get('prompt', 'N/A')[:50]}")
@@ -985,7 +1105,7 @@ def main() -> None:
     # --- Ctrl+C 信号处理：截获中断，保存 checkpoint 再退出 ---
     ckpt_dir_sig = Path(args.default_root_dir) / "checkpoints"
     ckpt_dir_sig.mkdir(parents=True, exist_ok=True)
-    
+
     def _sigint_handler(sig, frame):
         import os
         if not args.sigint_save:
@@ -1003,7 +1123,7 @@ def main() -> None:
         os._exit(0)
 
     signal.signal(signal.SIGINT, _sigint_handler)
-    
+
     trainer.fit(
         training_wrapper,
         train_dataloaders=train_dl,

@@ -46,6 +46,15 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertEqual(args.demo_control_variants, "correct,shuffled,zero")
         self.assertIsNone(args.demo_control_audio)
         self.assertIsNone(args.demo_prompt)
+        self.assertTrue(args.demo_melody_similarity)
+        self.assertEqual(args.demo_melody_similarity_csv, "demo_melody_similarity.csv")
+        self.assertFalse(args.melody_mask)
+        self.assertEqual(args.melody_full_mask_steps, 0)
+        self.assertEqual(args.melody_mask_schedule_steps, 10000)
+        self.assertEqual(args.melody_frame_mask_ratio_start, 0.75)
+        self.assertEqual(args.melody_frame_mask_ratio_end, 0.10)
+        self.assertEqual(args.melody_secondary_mask_prob, 0.15)
+        self.assertEqual(args.melody_secondary_shuffle_prob, 0.15)
 
     def test_arg_parser_accepts_demo_cost_overrides(self) -> None:
         module = _load_script_module()
@@ -65,6 +74,10 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
                 "correct,zero",
                 "--demo-prompt",
                 "instrumental piano melody",
+                "--demo-melody-similarity",
+                "false",
+                "--demo-melody-similarity-csv",
+                "demo_scores.csv",
             ]
         )
 
@@ -73,6 +86,60 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertEqual(module.parse_demo_control_scales(args.demo_control_scales), [0.0, 1.0])
         self.assertEqual(module.parse_demo_control_variants(args.demo_control_variants), ["correct", "zero"])
         self.assertEqual(args.demo_prompt, "instrumental piano melody")
+        self.assertFalse(args.demo_melody_similarity)
+        self.assertEqual(args.demo_melody_similarity_csv, "demo_scores.csv")
+
+    def test_arg_parser_accepts_melody_mask_overrides(self) -> None:
+        module = _load_script_module()
+        parser = module.build_arg_parser()
+
+        args = parser.parse_args(
+            [
+                "--dataset-config",
+                "dummy_dataset.json",
+                "--melody-mask",
+                "true",
+                "--melody-full-mask-steps",
+                "500",
+                "--melody-mask-schedule-steps",
+                "4000",
+                "--melody-frame-mask-ratio-start",
+                "0.9",
+                "--melody-frame-mask-ratio-end",
+                "0.05",
+                "--melody-secondary-mask-prob",
+                "0.25",
+                "--melody-secondary-shuffle-prob",
+                "0.35",
+            ]
+        )
+
+        config = module.build_melody_masking_config(args)
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.full_mask_steps, 500)
+        self.assertEqual(config.schedule_steps, 4000)
+        self.assertEqual(config.frame_mask_ratio_start, 0.9)
+        self.assertEqual(config.frame_mask_ratio_end, 0.05)
+        self.assertEqual(config.secondary_mask_prob, 0.25)
+        self.assertEqual(config.secondary_shuffle_prob, 0.35)
+
+    def test_melody_mask_config_rejects_invalid_ratios(self) -> None:
+        module = _load_script_module()
+        parser = module.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "--dataset-config",
+                "dummy_dataset.json",
+                "--melody-mask",
+                "true",
+                "--melody-frame-mask-ratio-start",
+                "1.2",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "frame_mask_ratio_start"):
+            module.build_melody_masking_config(args)
 
     def test_training_demo_count_is_independent_of_batch_size(self) -> None:
         module = _load_script_module()
@@ -257,6 +324,71 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertIsInstance(normalized[0]["padding_mask"], list)
         self.assertIs(normalized[0]["padding_mask"][0], padding_mask)
         self.assertEqual(tuple(torch.stack([md["padding_mask"][0] for md in normalized], dim=0).shape), (1, 16))
+
+    def test_melody_augmenter_applies_progressive_mask_only_in_training_context(self) -> None:
+        module = _load_script_module()
+
+        class FakeConditioner(torch.nn.Module):
+            def forward(self, metadata, device):
+                return {}
+
+        class FakeExtractor:
+            def extract(self, waveform):
+                return torch.arange(1, 1 + 8 * 4, dtype=torch.long).reshape(1, 8, 4)
+
+        augmenter = module.MelodyControlAugmenter(
+            base_conditioner=FakeConditioner(),
+            control_id="melody_control",
+            extractor=FakeExtractor(),
+            control_channels=8,
+            empty_dtype=torch.long,
+            melody_masking_config=module.MelodyMaskingConfig(
+                enabled=True,
+                full_mask_steps=10,
+            ),
+        )
+        metadata = [{"prompt": "test", "padding_mask": torch.ones(8)}]
+        audio = torch.zeros((1, 2, 8))
+
+        augmenter.set_training_context(global_step=0, training=True)
+        augmenter.set_batch_audio(audio)
+        training_conditioning = augmenter(metadata, torch.device("cpu"))
+
+        augmenter.set_training_context(global_step=0, training=False)
+        augmenter.set_batch_audio(audio)
+        validation_conditioning = augmenter(metadata, torch.device("cpu"))
+
+        self.assertTrue(torch.equal(training_conditioning["melody_control"][0], torch.zeros((1, 8, 4), dtype=torch.long)))
+        self.assertFalse(torch.equal(validation_conditioning["melody_control"][0], torch.zeros((1, 8, 4), dtype=torch.long)))
+
+    def test_melody_augmenter_zeroes_padded_cqt_frames_from_metadata(self) -> None:
+        module = _load_script_module()
+
+        class FakeConditioner(torch.nn.Module):
+            def forward(self, metadata, device):
+                return {}
+
+        class FakeExtractor:
+            def extract(self, waveform):
+                return torch.ones((1, 8, 4), dtype=torch.long)
+
+        augmenter = module.MelodyControlAugmenter(
+            base_conditioner=FakeConditioner(),
+            control_id="melody_control",
+            extractor=FakeExtractor(),
+            control_channels=8,
+            empty_dtype=torch.long,
+            melody_masking_config=module.MelodyMaskingConfig(enabled=False),
+        )
+        metadata = [{"prompt": "test", "padding_mask": torch.tensor([1, 1, 1, 1, 0, 0, 0, 0])}]
+
+        augmenter.set_training_context(global_step=100, training=True)
+        augmenter.set_batch_audio(torch.zeros((1, 2, 8)))
+        conditioning = augmenter(metadata, torch.device("cpu"))
+
+        melody_control = conditioning["melody_control"][0]
+        self.assertTrue(torch.equal(melody_control[:, :, :2], torch.ones_like(melody_control[:, :, :2])))
+        self.assertTrue(torch.equal(melody_control[:, :, 2:], torch.zeros_like(melody_control[:, :, 2:])))
 
 
 if __name__ == "__main__":
