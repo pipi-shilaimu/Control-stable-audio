@@ -41,6 +41,8 @@ def build_melody_extractor(
     cqt_backend: BackendLiteral,
     chroma_bins: int,
     chroma_n_fft: int,
+    cqt_silence_threshold_ratio: float = 0.01,
+    cqt_silence_threshold_abs: float = 1e-8,
 ) -> MelodyExtractor:
     if feature == "cqt":
         return CQTTopKExtractor(
@@ -53,6 +55,8 @@ def build_melody_extractor(
                 hop_length=hop_length,
                 top_k=top_k,
                 backend=cqt_backend,
+                silence_threshold_ratio=cqt_silence_threshold_ratio,
+                silence_threshold_abs=cqt_silence_threshold_abs,
             )
         )
     if feature == "chromagram":

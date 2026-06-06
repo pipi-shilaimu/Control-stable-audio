@@ -82,12 +82,12 @@ class BatchGenerateControlTests(unittest.TestCase):
         self.assertIn("CFG", joined)
         self.assertIn("melody control stays enabled", joined)
 
-    def test_parses_slash_separated_control_variants_and_aliases_shuffle(self) -> None:
+    def test_parses_slash_separated_control_variants_and_aliases(self) -> None:
         module = _load_batch_generate_module()
 
-        variants = module.parse_demo_control_variants("correct/zero/shuffle")
+        variants = module.parse_demo_control_variants("correct/zero/shuffle/shuffled/null/disabled/none")
 
-        self.assertEqual(variants, ["correct", "zero", "shuffled"])
+        self.assertEqual(variants, ["correct", "zero", "shuffled", "null"])
 
     def test_rejects_unknown_control_variant(self) -> None:
         module = _load_batch_generate_module()
@@ -102,10 +102,12 @@ class BatchGenerateControlTests(unittest.TestCase):
         correct = module.make_control_variant_audio(reference_audio, "correct")
         zero = module.make_control_variant_audio(reference_audio, "zero")
         shuffled = module.make_control_variant_audio(reference_audio, "shuffled")
+        null = module.make_control_variant_audio(reference_audio, "null")
 
         torch.testing.assert_close(correct, reference_audio)
         torch.testing.assert_close(zero, torch.zeros_like(reference_audio))
         torch.testing.assert_close(shuffled, torch.flip(reference_audio, dims=[-1]))
+        self.assertIsNone(null)
 
     def test_formats_output_name_without_variant_for_default_single_correct(self) -> None:
         module = _load_batch_generate_module()

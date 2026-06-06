@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stable_audio_control.melody.masking import (
     MelodyMaskingConfig,
     apply_progressive_melody_mask,
+    zero_melody_frames_from_energy,
     zero_melody_frames_from_padding_mask,
 )
 
@@ -176,6 +177,33 @@ class MelodyMaskingTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(masked, melody))
         self.assertIsNot(masked, melody)
+
+    def test_energy_mask_zeroes_silent_and_low_energy_cqt_frames(self) -> None:
+        melody = torch.arange(1, 1 + 8 * 4, dtype=torch.long).reshape(1, 8, 4)
+        frame_energy = torch.tensor([[0.0, 0.001, 0.1, 1.0]], dtype=torch.float32)
+
+        masked = zero_melody_frames_from_energy(
+            melody,
+            frame_energy=frame_energy,
+            min_energy_ratio=0.05,
+            min_energy_abs=1e-6,
+        )
+
+        self.assertTrue(torch.equal(masked[:, :, :2], torch.zeros_like(masked[:, :, :2])))
+        self.assertTrue(torch.equal(masked[:, :, 2:], melody[:, :, 2:]))
+
+    def test_energy_mask_zeroes_all_frames_when_audio_is_silent(self) -> None:
+        melody = torch.ones((1, 8, 4), dtype=torch.long)
+        frame_energy = torch.zeros((1, 4), dtype=torch.float32)
+
+        masked = zero_melody_frames_from_energy(
+            melody,
+            frame_energy=frame_energy,
+            min_energy_ratio=0.01,
+            min_energy_abs=1e-8,
+        )
+
+        self.assertTrue(torch.equal(masked, torch.zeros_like(melody)))
 
 
 if __name__ == "__main__":

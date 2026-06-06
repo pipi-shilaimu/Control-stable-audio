@@ -244,12 +244,23 @@ def parse_demo_control_variants(value: str) -> List[str]:
     if not parts:
         raise ValueError("--demo-control-variants must contain at least one variant.")
 
-    allowed = set(DEFAULT_CONTROL_VARIANTS)
+    aliases = {
+        "shuffle": "shuffled",
+        "zero_audio": "zero",
+        "disabled": "null",
+        "none": "null",
+        "null": "null",
+    }
+    allowed = set(DEFAULT_CONTROL_VARIANTS) | set(aliases)
+    variants: List[str] = []
     for part in parts:
         if part not in allowed:
             expected = ", ".join(DEFAULT_CONTROL_VARIANTS)
             raise ValueError(f"Unknown control variant: {part}. Expected one of: {expected}.")
-    return parts
+        variant = aliases.get(part, part)
+        if variant not in variants:
+            variants.append(variant)
+    return variants
 
 
 def resolve_training_demo_count(*, batch_size: int) -> int:
@@ -429,7 +440,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--demo-control-variants",
         type=str,
         default=_csv_default(DEFAULT_CONTROL_VARIANTS),
-        help="Comma-separated demo control variants: correct, shuffled, zero.",
+        help="Comma-separated demo control variants: correct, shuffled, zero, null/disabled.",
     )
     parser.add_argument(
         "--demo-control-audio",
@@ -454,6 +465,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="demo_melody_similarity.csv",
         help="CSV path for demo melody similarity rows. Relative paths are resolved under --default-root-dir.",
+    )
+    parser.add_argument(
+        "--demo-control-diagnostics",
+        type=_str_to_bool,
+        default=True,
+        help="If True, append demo control-input, forward-delta, and generated-audio spectral diagnostics to CSV.",
+    )
+    parser.add_argument(
+        "--demo-control-diagnostics-csv",
+        type=str,
+        default="demo_control_diagnostics.csv",
+        help="CSV path for demo control diagnostics. Relative paths are resolved under --default-root-dir.",
+    )
+    parser.add_argument(
+        "--demo-stop-on-collapse",
+        type=_str_to_bool,
+        default=False,
+        help="If True, request trainer stop when correct/shuffled forward_delta cosine exceeds the collapse threshold.",
+    )
+    parser.add_argument(
+        "--demo-collapse-cosine-threshold",
+        type=float,
+        default=0.98,
+        help="Collapse warning/stop threshold for correct vs shuffled forward_delta cosine.",
     )
     length_group = parser.add_mutually_exclusive_group()
     length_group.add_argument(
@@ -485,6 +520,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fmin-hz", type=float, default=8.175798915643707)
     parser.add_argument("--hop-length", type=int, default=512)
     parser.add_argument("--highpass-cutoff-hz", type=float, default=261.2)
+    parser.add_argument(
+        "--cqt-silence-threshold-ratio",
+        type=float,
+        default=0.01,
+        help="Set CQT frames below this fraction of per-sample max frame energy to token 0.",
+    )
+    parser.add_argument(
+        "--cqt-silence-threshold-abs",
+        type=float,
+        default=1e-8,
+        help="Set CQT frames below this absolute frame-energy floor to token 0.",
+    )
     parser.add_argument("--cqt-backend", type=str, choices=["auto", "nnaudio", "librosa"], default="auto")
 
     # Chromagram args
@@ -897,6 +944,8 @@ def main() -> None:
         cqt_backend=args.cqt_backend,
         chroma_bins=args.chroma_bins,
         chroma_n_fft=args.chroma_n_fft,
+        cqt_silence_threshold_ratio=args.cqt_silence_threshold_ratio,
+        cqt_silence_threshold_abs=args.cqt_silence_threshold_abs,
     )
 
     melody_augmenter = MelodyControlAugmenter(
@@ -971,6 +1020,10 @@ def main() -> None:
                 demo_melody_similarity_csv=args.demo_melody_similarity_csv,
                 demo_melody_similarity_feature=args.melody_feature,
                 demo_melody_similarity_top_k=args.top_k,
+                demo_control_diagnostics=bool(args.demo_control_diagnostics),
+                demo_control_diagnostics_csv=args.demo_control_diagnostics_csv,
+                stop_on_collapse=bool(args.demo_stop_on_collapse),
+                collapse_cosine_threshold=float(args.demo_collapse_cosine_threshold),
             )
         )
     # 无论有无验证集，都按步数定时保存 checkpoint

@@ -53,8 +53,12 @@ DEFAULT_DEMO_CONTROL_VARIANTS = ["correct"]
 _CONTROL_VARIANT_ALIASES = {
     "correct": "correct",
     "zero": "zero",
+    "zero_audio": "zero",
     "shuffle": "shuffled",
     "shuffled": "shuffled",
+    "null": "null",
+    "disabled": "null",
+    "none": "null",
 }
 
 
@@ -81,7 +85,7 @@ def parse_demo_control_variants(value: str) -> list[str]:
     return variants
 
 
-def make_control_variant_audio(reference_audio: torch.Tensor, variant: str) -> torch.Tensor:
+def make_control_variant_audio(reference_audio: torch.Tensor, variant: str) -> torch.Tensor | None:
     """Return the reference audio used to extract the requested diagnostic control."""
 
     variant = _normalize_control_variant(variant)
@@ -91,6 +95,8 @@ def make_control_variant_audio(reference_audio: torch.Tensor, variant: str) -> t
         return torch.zeros_like(reference_audio)
     if variant == "shuffled":
         return torch.flip(reference_audio, dims=[-1])
+    if variant == "null":
+        return None
     raise AssertionError(f"Unhandled normalized control variant: {variant}")
 
 
@@ -171,7 +177,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_DEMO_CONTROL_VARIANTS),
         help=(
             "Control diagnostic variants to generate. Accepts comma or slash separators. "
-            "Supported: correct, zero, shuffle/shuffled. Example: correct/zero/shuffle."
+            "Supported: correct, zero, shuffle/shuffled, null/disabled/none. "
+            "Example: correct/zero/shuffle/null."
         ),
     )
     p.add_argument("--prefer-ema", type=bool, default=True, action=argparse.BooleanOptionalAction)
@@ -263,9 +270,12 @@ def main():
     if control_model.pretransform is not None:
         latent_sample_size = sample_size // int(control_model.pretransform.downsampling_ratio)
 
-    control_inputs: dict[str, torch.Tensor] = {}
+    control_inputs: dict[str, torch.Tensor | None] = {}
     for variant in control_variants:
         variant_audio = make_control_variant_audio(reference_audio, variant)
+        if variant_audio is None:
+            control_inputs[variant] = None
+            continue
         melody_control = extractor.extract(variant_audio).to(device=device)
         control_input = control_model._extract_control_input(
             cond={args.control_id: [melody_control, None]},

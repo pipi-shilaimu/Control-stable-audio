@@ -6,6 +6,8 @@ from typing import Literal, Optional, Tuple
 import torch
 import torchaudio
 
+from stable_audio_control.melody.masking import zero_melody_frames_from_energy
+
 BackendLiteral = Literal["auto", "nnaudio", "librosa"]
 
 
@@ -19,6 +21,14 @@ class CQTTopKConfig:
     hop_length: int = 512
     top_k: int = 4
     backend: BackendLiteral = "auto"
+    silence_threshold_ratio: float = 0.01
+    silence_threshold_abs: float = 1e-8
+
+    def __post_init__(self) -> None:
+        if self.silence_threshold_ratio < 0.0:
+            raise ValueError("silence_threshold_ratio must be non-negative.")
+        if self.silence_threshold_abs < 0.0:
+            raise ValueError("silence_threshold_abs must be non-negative.")
 
 
 class CQTTopKExtractor:
@@ -143,6 +153,7 @@ class CQTTopKExtractor:
                 magnitude = self._cqt_with_nnaudio(filtered)
             else:
                 magnitude = self._cqt_with_librosa(filtered)
+            frame_energy = magnitude.sum(dim=(1, 2))
 
             # [B, 2, n_bins, F] -> top-k over n_bins -> [B, 2, K, F]
             _, topk_idx = torch.topk(magnitude, k=self.config.top_k, dim=2, largest=True, sorted=True)
@@ -151,10 +162,15 @@ class CQTTopKExtractor:
         topk_idx = topk_idx + 1
 
         # Interleave as [L0, R0, L1, R1, ...] and return [B, 2K, F].
-        left = topk_idx[:, 0, :, :]
-        right = topk_idx[:, 1, :, :]
-        interleaved = torch.stack((left, right), dim=3).reshape(
+        interleaved = topk_idx.permute(0, 2, 1, 3).reshape(
             topk_idx.shape[0], topk_idx.shape[2] * 2, topk_idx.shape[3]
+        )
+
+        interleaved = zero_melody_frames_from_energy(
+            interleaved,
+            frame_energy=frame_energy,
+            min_energy_ratio=float(self.config.silence_threshold_ratio),
+            min_energy_abs=float(self.config.silence_threshold_abs),
         )
 
         return interleaved.to(torch.long)

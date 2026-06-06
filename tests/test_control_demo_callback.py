@@ -107,16 +107,18 @@ class ControlDemoCallbackTests(unittest.TestCase):
 
         combos = callback.iter_control_demo_combinations()
 
-        self.assertEqual(len(combos), 2 * 5 * 3)
+        self.assertEqual(len(combos), 2 * 5 * 4)
         self.assertEqual(
-            combos[:3],
+            combos[:4],
             [
                 (3, 0.0, "correct"),
                 (3, 0.0, "shuffled"),
                 (3, 0.0, "zero"),
+                (3, 0.0, "null"),
             ],
         )
         self.assertIn((6, 1.0, "zero"), combos)
+        self.assertIn((6, 1.0, "null"), combos)
 
     def test_single_control_scale_remains_backward_compatible(self) -> None:
         module = _load_callback_module()
@@ -159,12 +161,54 @@ class ControlDemoCallbackTests(unittest.TestCase):
         correct = callback.make_variant_reals(reals, "correct")
         shuffled = callback.make_variant_reals(reals, "shuffled")
         zero = callback.make_variant_reals(reals, "zero")
+        null = callback.make_variant_reals(reals, "null")
 
         torch.testing.assert_close(correct, reals)
         torch.testing.assert_close(shuffled, torch.roll(reals, shifts=1, dims=0))
         torch.testing.assert_close(zero, torch.zeros_like(reals))
+        self.assertIsNone(null)
         self.assertIsNot(shuffled, reals)
         self.assertIsNot(zero, reals)
+
+    def test_normalizes_disabled_control_variant_aliases_to_null(self) -> None:
+        module = _load_callback_module()
+
+        self.assertEqual(module.normalize_control_variant("disabled"), "null")
+        self.assertEqual(module.normalize_control_variant("none"), "null")
+
+    def test_audio_spectral_stats_report_low_mid_bias(self) -> None:
+        module = _load_callback_module()
+        sample_rate = 8000
+        t = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+        low_tone = torch.sin(2 * torch.pi * 100 * t).reshape(1, -1)
+        high_tone = torch.sin(2 * torch.pi * 3000 * t).reshape(1, -1)
+
+        low_stats = module.compute_audio_spectral_stats(low_tone, sample_rate=sample_rate)
+        high_stats = module.compute_audio_spectral_stats(high_tone, sample_rate=sample_rate)
+
+        self.assertGreater(low_stats["low_band_ratio"], 0.8)
+        self.assertGreater(low_stats["low_mid_band_ratio"], high_stats["low_mid_band_ratio"])
+        self.assertGreater(high_stats["high_band_ratio"], 0.8)
+
+    def test_normalizes_silent_demo_audio_to_zero_int16_without_nan(self) -> None:
+        module = _load_callback_module()
+        silent = torch.zeros(2, 16, dtype=torch.float32)
+
+        wav = module.normalize_audio_for_wav(silent)
+
+        self.assertEqual(wav.dtype, torch.int16)
+        self.assertEqual(tuple(wav.shape), (2, 16))
+        self.assertTrue(torch.equal(wav, torch.zeros_like(wav)))
+
+    def test_pairwise_delta_stats_detect_identical_correct_and_shuffled(self) -> None:
+        module = _load_callback_module()
+        correct = torch.tensor([1.0, 1.0, 0.0])
+        shuffled = torch.tensor([1.0, 1.0, 0.0])
+
+        stats = module.compute_pairwise_delta_stats(correct, shuffled)
+
+        self.assertAlmostEqual(stats["cosine"], 1.0, places=6)
+        self.assertAlmostEqual(stats["relative_l2_difference"], 0.0, places=6)
 
     def test_shuffled_single_item_batch_uses_time_reversal_fallback(self) -> None:
         module = _load_callback_module()
@@ -302,26 +346,30 @@ class ControlDemoCallbackTests(unittest.TestCase):
             demo_steps=2,
             demo_cfg_scales=[3],
             control_scales=[0.0, 0.3],
-            control_variants=["correct", "zero"],
+            control_variants=["correct", "zero", "null"],
             demo_melody_similarity=False,
         )
 
         callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
 
-        self.assertEqual(diffusion.conditioner_calls, 4)
+        self.assertEqual(diffusion.conditioner_calls, 6)
         self.assertEqual(len(augmenter.calls), 4)
         demo_reals = reals[:1]
         torch.testing.assert_close(augmenter.calls[0], demo_reals)
         torch.testing.assert_close(augmenter.calls[1], torch.zeros_like(demo_reals))
-        self.assertEqual(noise_batch_sizes, [1, 1, 1, 1])
-        self.assertEqual([call["control_scale"] for call in sample_calls], [0.0, 0.0, 0.3, 0.3])
+        torch.testing.assert_close(augmenter.calls[2], demo_reals)
+        torch.testing.assert_close(augmenter.calls[3], torch.zeros_like(demo_reals))
+        self.assertEqual(noise_batch_sizes, [1, 1, 1, 1, 1, 1])
+        self.assertEqual([call["control_scale"] for call in sample_calls], [0.0, 0.0, 0.0, 0.3, 0.3, 0.3])
         self.assertEqual(
             audio_tags,
             [
                 "demo_step_00000001_cfg_3_control_0_correct",
                 "demo_step_00000001_cfg_3_control_0_zero",
+                "demo_step_00000001_cfg_3_control_0_null",
                 "demo_step_00000001_cfg_3_control_0p3_correct",
                 "demo_step_00000001_cfg_3_control_0p3_zero",
+                "demo_step_00000001_cfg_3_control_0p3_null",
             ],
         )
         self.assertEqual(
@@ -329,10 +377,97 @@ class ControlDemoCallbackTests(unittest.TestCase):
             [
                 "demo_melspec_step_00000001_cfg_3_control_0_correct",
                 "demo_melspec_step_00000001_cfg_3_control_0_zero",
+                "demo_melspec_step_00000001_cfg_3_control_0_null",
                 "demo_melspec_step_00000001_cfg_3_control_0p3_correct",
                 "demo_melspec_step_00000001_cfg_3_control_0p3_zero",
+                "demo_melspec_step_00000001_cfg_3_control_0p3_null",
             ],
         )
+
+    def test_train_batch_end_writes_one_pairwise_collapse_row_per_control_scale(self) -> None:
+        module = _load_callback_module()
+        module.sample = lambda model, noise, steps, eta, **kwargs: noise + 1.0
+        module.sf.write = lambda *args, **kwargs: None
+        module.log_audio = lambda *args, **kwargs: None
+        module.log_image = lambda *args, **kwargs: None
+        module.audio_spectrogram_image = lambda audio: audio
+
+        class DemoModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(()))
+
+            def forward(self, x, t, **kwargs):
+                control_input = kwargs.get("control_input")
+                control_scale = float(kwargs.get("control_scale", 0.0))
+                if control_input is None:
+                    return x
+                return x + control_input.to(dtype=x.dtype) * control_scale
+
+        class MelodyAugmenter:
+            def __init__(self) -> None:
+                self.last_audio = None
+
+            def set_batch_audio(self, audio: torch.Tensor) -> None:
+                self.last_audio = audio.clone()
+
+        class Diffusion:
+            io_channels = 1
+            pretransform = None
+
+            def __init__(self, augmenter: MelodyAugmenter) -> None:
+                self.model = DemoModel()
+                self.augmenter = augmenter
+
+            def conditioner(self, cond, device):
+                if self.augmenter.last_audio is None:
+                    return {"text": True}
+                return {"melody_control": [self.augmenter.last_audio.mean(dim=1, keepdim=True), None]}
+
+            def _extract_control_input(self, *, cond, target_len, dtype, device):
+                if "melody_control" not in cond:
+                    return None
+                return torch.ones((1, 1, target_len), device=device, dtype=dtype)
+
+        augmenter = MelodyAugmenter()
+        diffusion = Diffusion(augmenter)
+        module_under_test = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            diffusion=diffusion,
+            melody_augmenter=augmenter,
+            eval=lambda: None,
+            train=lambda: None,
+        )
+        reals = torch.arange(1 * 1 * 6, dtype=torch.float32).reshape(1, 1, 6)
+        metadata = [{"prompt": "a"}]
+        callback = module.ControlNetDemoCallback(
+            demo_every=1,
+            num_demos=1,
+            sample_size=6,
+            demo_steps=2,
+            demo_cfg_scales=[3],
+            control_scales=[0.3],
+            control_variants=["correct", "shuffled", "zero", "null"],
+            demo_melody_similarity=False,
+            demo_control_diagnostics=True,
+            demo_control_diagnostics_csv="diag.csv",
+            stop_on_collapse=True,
+            collapse_cosine_threshold=0.98,
+        )
+
+        with TemporaryDirectory() as tmp:
+            trainer = types.SimpleNamespace(global_step=1, default_root_dir=tmp, logger=object(), should_stop=False)
+            callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
+            with (Path(tmp) / "diag.csv").open("r", encoding="utf-8", newline="") as fp:
+                rows = list(csv.DictReader(fp))
+
+        pairwise_rows = [row for row in rows if row["row_type"] == "pairwise"]
+        self.assertEqual(len(pairwise_rows), 1)
+        self.assertEqual(pairwise_rows[0]["variant"], "correct_vs_shuffled")
+        self.assertEqual(pairwise_rows[0]["variant_a"], "correct")
+        self.assertEqual(pairwise_rows[0]["variant_b"], "shuffled")
+        self.assertIn("correct/shuffled forward_delta collapse", pairwise_rows[0]["warning"])
+        self.assertTrue(trainer.should_stop)
 
     def test_train_batch_end_writes_each_demo_without_concatenating_batch_time(self) -> None:
         module = _load_callback_module()

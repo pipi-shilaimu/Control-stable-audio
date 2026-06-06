@@ -1,6 +1,6 @@
 # train_controlnet_dit.py 完整参数参考
 
-> 最后一次更新：2026-06-04  对应文件：`stable_audio_control/scripts/train_controlnet_dit.py`
+> 最后一次更新：2026-06-06  对应文件：`stable_audio_control/scripts/train_controlnet_dit.py`
 
 ---
 
@@ -123,11 +123,15 @@
 | `--demo-steps` | `int` | `100` | Demo 采样步数。越少越快，越多质量越好 |
 | `--demo-cfg-scales` | `str` | `"3,6,9"` | 逗号分隔的 CFG scale 值。如 `"7"` 或 `"5,7,9"` |
 | `--demo-control-scales` | `str` | `"0,0.1,0.3,0.6,1"` | 逗号分隔的 control_scale 值。生成 `N_cfg × N_control × N_variants` 个样本 |
-| `--demo-control-variants` | `str` | `"correct,shuffled,zero"` | 逗号分隔的对照类型。`correct`=正确旋律，`shuffled`=错位/反转旋律，`zero`=全零旋律 |
+| `--demo-control-variants` | `str` | `"correct,shuffled,zero,null"` | 逗号分隔的对照类型。`correct`=正确旋律，`shuffled`=错位/反转旋律，`zero`=全零音频经 CQT，`null`/`disabled`/`none`=真正移除 melody control |
 | `--demo-control-audio` | `str` | `None` | 固定音频文件作为控制源。`None` = 用当前 batch 的音频 |
 | `--demo-prompt` | `str` | `None` | 固定文本 prompt。`None` = 用当前 batch 的 metadata prompt |
 | `--demo-melody-similarity` | `bool` | `true` | Demo 生成时是否即时计算生成音频与参考/control 音频的旋律相似度 |
 | `--demo-melody-similarity-csv` | `str` | `demo_melody_similarity.csv` | Demo melody similarity CSV 文件名。相对路径会写到 `--default-root-dir` 下 |
+| `--demo-control-diagnostics` | `bool` | `true` | 是否记录 demo 的 `control_input`、`forward_delta` 和生成音频频谱退化指标 |
+| `--demo-control-diagnostics-csv` | `str` | `demo_control_diagnostics.csv` | Demo control diagnostics CSV 文件名。相对路径会写到 `--default-root-dir` 下 |
+| `--demo-stop-on-collapse` | `bool` | `false` | 若 `correct/shuffled forward_delta` cosine 超阈值，是否请求 Trainer 停训 |
+| `--demo-collapse-cosine-threshold` | `float` | `0.98` | `correct` 与 `shuffled` 的 `forward_delta` cosine collapse 警戒线 |
 
 ### Demo 参数解读
 
@@ -137,9 +141,9 @@ Demo 生成的总样本数 = `len(demo_cfg_scales) × len(demo_control_scales) �
 ```bash
 --demo-cfg-scales "7" \
 --demo-control-scales "0,0.6,1.0" \
---demo-control-variants "correct,shuffled,zero"
+--demo-control-variants "correct,shuffled,zero,null"
 ```
-→ 每轮 demo 生成 `1 × 3 × 3 = 9` 个 wav 文件。
+→ 每轮 demo 生成 `1 × 3 × 4 = 12` 个 wav 文件。
 
 `--demo-melody-similarity true` 时，每条 demo 生成后会立即用内存中的 reference/control audio 与 generated audio 计算轻量 CQT 指标，并追加到：
 
@@ -154,22 +158,47 @@ CSV 主要字段：
 | `step` | 当前 global step |
 | `cfg_scale` | 本条 demo 使用的 CFG scale |
 | `control_scale` | 本条 demo 使用的 control scale |
-| `variant` | `correct`、`shuffled` 或 `zero` |
+| `variant` | `correct`、`shuffled`、`zero` 或 `null` |
 | `metric_name` | 指标名。无前缀表示 self-reference；`original_ref_...` 表示统一和原始 correct control audio 比较 |
 | `cqt_top1_score` | 参考与生成音频 top-1 CQT pitch token 的 frame-wise accuracy |
 | `cqt_topk_score` | 参考与生成音频 top-k CQT pitch overlap rate |
-| `skipped_reason` | 跳过评分原因。`zero` 的 self-reference 行没有有效参考旋律，会记录为 skip，但仍会额外写 `original_ref_...` 评分行 |
+| `skipped_reason` | 跳过评分原因。`zero`/`null` 的 self-reference 行没有有效参考旋律，会记录为 skip，但仍会额外写 `original_ref_...` 评分行 |
 
-每个非 `zero` variant 默认会写两类行：
+评分默认会写两类行：
 
 - `metric_name=cqt_topk_pitch_overlap_rate`：self-reference，生成音频和本 variant 使用的控制旋律比较。`shuffled` 分数高表示模型可能跟随 shuffled control，不一定是坏事。
 - `metric_name=original_ref_cqt_topk_pitch_overlap_rate`：original-reference，所有 variant 都和原始 correct control audio 比较。这个字段用于判断 `shuffled` / `zero` 是否仍然贴着原旋律。
 
+`zero` 和 `null` 没有有效 self-reference melody，因此 self-reference 行会记录 `skipped_reason`；它们仍会写 `original_ref_...` 行。
+
 **诊断标准**：
 - `correct` 的 self-reference 和 original-reference 都高，且 `control_scale=1` 高于 `control_scale=0` → ControlNet 在工作
 - `shuffled` 的 self-reference 高、original-reference 低 → 模型在"听"控制，不是盲贴原旋律
-- `zero` 的 original-reference 低 → 全零控制确实削弱原旋律跟随
+- `zero` 的 original-reference 低 → 全零音频经 CQT 后没有诱发伪旋律跟随
+- `null` 的 original-reference 接近无控制基线 → 真正禁用 melody control 的基线正常
 - 三个 variant 没区别 → 控制分支未学会听从控制信号
+
+`--demo-control-diagnostics true` 时还会追加：
+
+```text
+{default_root_dir}/demo_control_diagnostics.csv
+```
+
+重点字段：
+
+| 字段 | 说明 |
+|------|------|
+| `row_type=variant` | 单个 variant 的诊断行 |
+| `control_input_rms` / `control_input_zero_ratio` | 进入 ControlNet transformer 前的控制输入强度与零比例 |
+| `forward_delta_rms` | 同一 noise 下，`control_scale=当前值` 相对 `control_scale=0` 的 denoiser 输出变化强度 |
+| `forward_delta_frame_active_ratio` | `forward_delta` 在时间帧上是否持续活跃。接近 1 且无旋律区分时，常见于连续残差/糊声退化 |
+| `row_type=pairwise` | `correct` 与 `shuffled` 的成对对比行 |
+| `forward_delta_cosine` | `correct` vs `shuffled` 的 denoiser delta 方向相似度。接近 1 表示模型几乎不区分正确/打乱旋律 |
+| `forward_delta_relative_l2_difference` | `correct` vs `shuffled` 的相对 L2 差异 |
+| `audio_silence_ratio` | 生成音频静音帧比例 |
+| `low_band_ratio` / `mid_band_ratio` / `high_band_ratio` / `low_mid_band_ratio` | 生成音频频谱能量分布，用于观察中低频连续糊声或高频缺失 |
+| `spectral_centroid_hz` | 频谱质心，越低通常越偏低频/闷糊 |
+| `warning` | collapse 警告文本。若同时启用 `--demo-stop-on-collapse true`，触发时会设置 `trainer.should_stop=True` |
 
 ## 旋律特征：CQT
 
@@ -182,7 +211,11 @@ CSV 主要字段：
 | `--fmin-hz` | `float` | `8.176` | CQT 最低频率（Hz） |
 | `--hop-length` | `int` | `512` | CQT 帧移 |
 | `--highpass-cutoff-hz` | `float` | `261.2` | 高通滤波截止频率（≈ 中央 C） |
+| `--cqt-silence-threshold-ratio` | `float` | `0.01` | CQT frame energy 低于“本样本最大 frame energy × 此比例”时，该帧 pitch token 置 0 |
+| `--cqt-silence-threshold-abs` | `float` | `1e-8` | CQT frame energy 低于此绝对阈值时，该帧 pitch token 置 0 |
 | `--cqt-backend` | `str` | `auto` | CQT 后端。`auto` → `nnaudio`（GPU）→ `librosa`（CPU fallback） |
+
+`--cqt-silence-threshold-ratio` 和 `--cqt-silence-threshold-abs` 的目的，是把低能量/静音 CQT frame 直接变成 token `0`，避免“静音 waveform → CQT top-k → 伪 pitch index”的诊断和训练污染。默认值偏保守，通常先不要关掉。
 
 ## 旋律特征：Chromagram（备选）
 
@@ -210,7 +243,10 @@ python3 stable_audio_control/scripts/train_controlnet_dit.py \
     --demo-every 100 \
     --demo-cfg-scales "7" \
     --demo-control-scales "0,0.6,1.0" \
-    --demo-control-variants "correct,shuffled,zero" \
+    --demo-control-variants "correct,shuffled,zero,null" \
+    --demo-control-diagnostics true \
+    --demo-stop-on-collapse true \
+    --demo-collapse-cosine-threshold 0.98 \
     --demo-steps 100 \
     --precision bf16-mixed \
     --default-root-dir outputs/overfit_test
@@ -229,7 +265,8 @@ python3 stable_audio_control/scripts/train_controlnet_dit.py \
     --demo-every 8000 \
     --demo-cfg-scales "5" \
     --demo-control-scales "0,0.1,0.3,0.6,1.0" \
-    --demo-control-variants "correct,shuffled,zero" \
+    --demo-control-variants "correct,shuffled,zero,null" \
+    --demo-control-diagnostics true \
     --demo-steps 30 \
     --melody-mask true \
     --melody-full-mask-steps 8000 \

@@ -38,16 +38,22 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         self.assertEqual(args.melody_embedding_dim, 64)
         self.assertEqual(args.melody_hidden_dim, 256)
         self.assertEqual(args.melody_conv_layers, 2)
+        self.assertEqual(args.cqt_silence_threshold_ratio, 0.01)
+        self.assertEqual(args.cqt_silence_threshold_abs, 1e-8)
         self.assertIsNone(args.seconds_total)
         self.assertIsNone(args.sample_size)
         self.assertEqual(module.parse_demo_cfg_scales(args.demo_cfg_scales), [3.0, 6.0, 9.0])
         self.assertEqual(args.demo_steps, 100)
         self.assertEqual(module.parse_demo_control_scales(args.demo_control_scales), [0.0, 0.1, 0.3, 0.6, 1.0])
-        self.assertEqual(args.demo_control_variants, "correct,shuffled,zero")
+        self.assertEqual(args.demo_control_variants, "correct,shuffled,zero,null")
         self.assertIsNone(args.demo_control_audio)
         self.assertIsNone(args.demo_prompt)
         self.assertTrue(args.demo_melody_similarity)
         self.assertEqual(args.demo_melody_similarity_csv, "demo_melody_similarity.csv")
+        self.assertTrue(args.demo_control_diagnostics)
+        self.assertEqual(args.demo_control_diagnostics_csv, "demo_control_diagnostics.csv")
+        self.assertFalse(args.demo_stop_on_collapse)
+        self.assertEqual(args.demo_collapse_cosine_threshold, 0.98)
         self.assertFalse(args.melody_mask)
         self.assertEqual(args.melody_full_mask_steps, 0)
         self.assertEqual(args.melody_mask_schedule_steps, 10000)
@@ -71,23 +77,35 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
                 "--demo-control-scales",
                 "0,1",
                 "--demo-control-variants",
-                "correct,zero",
+                "correct,disabled",
                 "--demo-prompt",
                 "instrumental piano melody",
                 "--demo-melody-similarity",
                 "false",
                 "--demo-melody-similarity-csv",
                 "demo_scores.csv",
+                "--demo-control-diagnostics",
+                "false",
+                "--demo-control-diagnostics-csv",
+                "diag.csv",
+                "--demo-stop-on-collapse",
+                "true",
+                "--demo-collapse-cosine-threshold",
+                "0.95",
             ]
         )
 
         self.assertEqual(module.parse_demo_cfg_scales(args.demo_cfg_scales), [6.0])
         self.assertEqual(args.demo_steps, 30)
         self.assertEqual(module.parse_demo_control_scales(args.demo_control_scales), [0.0, 1.0])
-        self.assertEqual(module.parse_demo_control_variants(args.demo_control_variants), ["correct", "zero"])
+        self.assertEqual(module.parse_demo_control_variants(args.demo_control_variants), ["correct", "null"])
         self.assertEqual(args.demo_prompt, "instrumental piano melody")
         self.assertFalse(args.demo_melody_similarity)
         self.assertEqual(args.demo_melody_similarity_csv, "demo_scores.csv")
+        self.assertFalse(args.demo_control_diagnostics)
+        self.assertEqual(args.demo_control_diagnostics_csv, "diag.csv")
+        self.assertTrue(args.demo_stop_on_collapse)
+        self.assertEqual(args.demo_collapse_cosine_threshold, 0.95)
 
     def test_arg_parser_accepts_melody_mask_overrides(self) -> None:
         module = _load_script_module()
@@ -224,8 +242,8 @@ class TrainControlNetDiTScriptTests(unittest.TestCase):
         module = _load_script_module()
 
         self.assertEqual(
-            module.parse_demo_control_variants("correct, shuffled, zero"),
-            ["correct", "shuffled", "zero"],
+            module.parse_demo_control_variants("correct, shuffle, shuffled, zero_audio, zero, disabled, none"),
+            ["correct", "shuffled", "zero", "null"],
         )
 
     def test_rejects_unknown_demo_control_variant(self) -> None:

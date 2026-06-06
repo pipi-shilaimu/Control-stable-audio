@@ -14,6 +14,7 @@ _extract_control_input → control_input → base_wrapper forwarding。
 from __future__ import annotations
 
 import csv
+import math
 import typing as tp
 from pathlib import Path
 
@@ -32,8 +33,18 @@ from stable_audio_control.inference.melody_similarity import compare_audio_tenso
 
 
 DEFAULT_CONTROL_SCALES = [0.0, 0.1, 0.3, 0.6, 1.0]
-DEFAULT_CONTROL_VARIANTS = ["correct", "shuffled", "zero"]
+DEFAULT_CONTROL_VARIANTS = ["correct", "shuffled", "zero", "null"]
 _CONTROL_SCALES_UNSET = object()
+CONTROL_VARIANT_ALIASES = {
+    "correct": "correct",
+    "shuffled": "shuffled",
+    "shuffle": "shuffled",
+    "zero": "zero",
+    "zero_audio": "zero",
+    "null": "null",
+    "disabled": "null",
+    "none": "null",
+}
 DEMO_MELODY_SIMILARITY_FIELDS = [
     "step",
     "demo_index",
@@ -49,6 +60,34 @@ DEMO_MELODY_SIMILARITY_FIELDS = [
     "total_tokens",
     "compared_frames",
     "skipped_reason",
+]
+DEMO_CONTROL_DIAGNOSTIC_FIELDS = [
+    "step",
+    "demo_index",
+    "cfg_scale",
+    "control_scale",
+    "variant",
+    "row_type",
+    "variant_a",
+    "variant_b",
+    "control_input_rms",
+    "control_input_mean_abs",
+    "control_input_zero_ratio",
+    "forward_delta_rms",
+    "forward_delta_mean_abs",
+    "forward_delta_zero_ratio",
+    "forward_delta_frame_active_ratio",
+    "forward_delta_cosine",
+    "forward_delta_relative_l2_difference",
+    "audio_rms",
+    "audio_peak",
+    "audio_silence_ratio",
+    "low_band_ratio",
+    "mid_band_ratio",
+    "high_band_ratio",
+    "low_mid_band_ratio",
+    "spectral_centroid_hz",
+    "warning",
 ]
 
 
@@ -93,6 +132,144 @@ def _format_scale(value: float | int) -> str:
     return text.replace("-", "neg").replace(".", "p")
 
 
+def normalize_control_variant(value: str) -> str:
+    variant = value.strip().lower()
+    if variant not in CONTROL_VARIANT_ALIASES:
+        expected = ", ".join(sorted(CONTROL_VARIANT_ALIASES))
+        raise ValueError(f"Unknown control variant: {value}. Expected one of: {expected}.")
+    return CONTROL_VARIANT_ALIASES[variant]
+
+
+def _safe_float(value: torch.Tensor | float | int) -> float:
+    result = float(value.item() if torch.is_tensor(value) else value)
+    if not math.isfinite(result):
+        return 0.0
+    return result
+
+
+def _tensor_zero_ratio(tensor: torch.Tensor, *, epsilon: float = 1e-12) -> float:
+    flat = tensor.detach().to(torch.float32).reshape(-1)
+    if flat.numel() == 0:
+        return 0.0
+    return _safe_float((flat.abs() <= float(epsilon)).to(torch.float32).mean())
+
+
+def _tensor_rms(tensor: torch.Tensor) -> float:
+    flat = tensor.detach().to(torch.float32).reshape(-1)
+    if flat.numel() == 0:
+        return 0.0
+    return _safe_float(flat.square().mean().sqrt())
+
+
+def _tensor_mean_abs(tensor: torch.Tensor) -> float:
+    flat = tensor.detach().to(torch.float32).reshape(-1)
+    if flat.numel() == 0:
+        return 0.0
+    return _safe_float(flat.abs().mean())
+
+
+def _frame_active_ratio(delta: torch.Tensor, *, epsilon: float = 1e-8) -> float:
+    data = delta.detach().to(torch.float32)
+    if data.ndim < 2:
+        return 0.0
+    frame_dim = data.ndim - 1
+    reduce_dims = tuple(dim for dim in range(data.ndim) if dim != frame_dim)
+    frame_rms = data.square().mean(dim=reduce_dims).sqrt()
+    return _safe_float((frame_rms > float(epsilon)).to(torch.float32).mean())
+
+
+def compute_pairwise_delta_stats(a: torch.Tensor, b: torch.Tensor) -> dict[str, float]:
+    a_flat = a.detach().to(torch.float32).reshape(-1)
+    b_flat = b.detach().to(torch.float32).reshape(-1)
+    if a_flat.numel() != b_flat.numel():
+        raise ValueError(f"Delta tensors must have the same number of values: {a_flat.numel()} vs {b_flat.numel()}")
+    diff = a_flat - b_flat
+    norm_a = _safe_float(a_flat.square().sum().sqrt())
+    norm_b = _safe_float(b_flat.square().sum().sqrt())
+    denom = max(norm_a * norm_b, 1e-12)
+    cosine = _safe_float((a_flat * b_flat).sum()) / denom
+    return {
+        "cosine": cosine,
+        "relative_l2_difference": _safe_float(diff.square().sum().sqrt()) / max(norm_a, norm_b, 1e-12),
+    }
+
+
+def _normalize_audio_for_stats(audio: torch.Tensor) -> torch.Tensor:
+    data = audio.detach().to(torch.float32).cpu()
+    if data.ndim == 3:
+        if data.shape[0] != 1:
+            data = data[:1]
+        data = data[0]
+    if data.ndim == 1:
+        data = data.unsqueeze(0)
+    if data.ndim != 2:
+        raise ValueError(f"audio must be [T], [C,T], or [1,C,T]; got shape={tuple(data.shape)}")
+    return data.mean(dim=0)
+
+
+def normalize_audio_for_wav(audio: torch.Tensor, *, epsilon: float = 1e-12) -> torch.Tensor:
+    """Peak-normalize demo audio for int16 WAV writing without turning silence into NaNs."""
+
+    data = torch.nan_to_num(audio.detach().to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    peak = _safe_float(data.abs().max()) if data.numel() > 0 else 0.0
+    if peak <= float(epsilon):
+        return torch.zeros_like(data, dtype=torch.int16).cpu()
+    return data.div(peak).clamp(-1.0, 1.0).mul(32767).to(torch.int16).cpu()
+
+
+def compute_audio_spectral_stats(audio: torch.Tensor, *, sample_rate: int) -> dict[str, float]:
+    mono = _normalize_audio_for_stats(audio)
+    if mono.numel() == 0:
+        return {
+            "audio_rms": 0.0,
+            "audio_peak": 0.0,
+            "audio_silence_ratio": 1.0,
+            "low_band_ratio": 0.0,
+            "mid_band_ratio": 0.0,
+            "high_band_ratio": 0.0,
+            "low_mid_band_ratio": 0.0,
+            "spectral_centroid_hz": 0.0,
+        }
+
+    mono = mono - mono.mean()
+    rms = _tensor_rms(mono)
+    peak = _safe_float(mono.abs().max())
+    frame_size = min(2048, max(16, int(mono.numel())))
+    hop = max(1, frame_size // 2)
+    if mono.numel() >= frame_size:
+        frames = mono.unfold(0, frame_size, hop)
+        frame_rms = frames.square().mean(dim=-1).sqrt()
+        silence_ratio = _safe_float((frame_rms <= max(1e-5, rms * 0.02)).to(torch.float32).mean())
+    else:
+        silence_ratio = 1.0 if rms <= 1e-5 else 0.0
+
+    spectrum = torch.fft.rfft(mono)
+    power = spectrum.abs().square()
+    freqs = torch.fft.rfftfreq(mono.numel(), d=1.0 / int(sample_rate))
+    total_power = max(_safe_float(power.sum()), 1e-12)
+
+    def band_ratio(low_hz: float, high_hz: float) -> float:
+        mask = (freqs >= float(low_hz)) & (freqs < float(high_hz))
+        if not bool(mask.any()):
+            return 0.0
+        return _safe_float(power[mask].sum()) / total_power
+
+    low_ratio = band_ratio(0.0, 250.0)
+    mid_ratio = band_ratio(250.0, 2000.0)
+    high_ratio = band_ratio(2000.0, float(sample_rate) / 2.0 + 1.0)
+    centroid = _safe_float((freqs * power).sum()) / total_power
+    return {
+        "audio_rms": rms,
+        "audio_peak": peak,
+        "audio_silence_ratio": silence_ratio,
+        "low_band_ratio": low_ratio,
+        "mid_band_ratio": mid_ratio,
+        "high_band_ratio": high_ratio,
+        "low_mid_band_ratio": low_ratio + mid_ratio,
+        "spectral_centroid_hz": centroid,
+    }
+
+
 class ControlNetDemoCallback(pl.Callback):
     """每 demo_every 步生成 demo 音频，自动注入 ControlNet 旋律控制条件。"""
 
@@ -114,6 +291,10 @@ class ControlNetDemoCallback(pl.Callback):
         demo_melody_similarity_csv: str = "demo_melody_similarity.csv",
         demo_melody_similarity_feature: str = "cqt",
         demo_melody_similarity_top_k: int = 4,
+        demo_control_diagnostics: bool = True,
+        demo_control_diagnostics_csv: str = "demo_control_diagnostics.csv",
+        stop_on_collapse: bool = False,
+        collapse_cosine_threshold: float = 0.98,
     ):
         super().__init__()
         self.demo_every = demo_every
@@ -125,7 +306,11 @@ class ControlNetDemoCallback(pl.Callback):
         self.demo_cfg_scales = demo_cfg_scales
         self.control_scales = self._resolve_control_scales(control_scale, control_scales)
         self.control_scale = float(self.control_scales[-1])
-        self.control_variants = list(control_variants or DEFAULT_CONTROL_VARIANTS)
+        self.control_variants = []
+        for variant in list(control_variants or DEFAULT_CONTROL_VARIANTS):
+            normalized = normalize_control_variant(variant)
+            if normalized not in self.control_variants:
+                self.control_variants.append(normalized)
         self.demo_control_audio_path = demo_control_audio_path
         self.demo_prompt = demo_prompt
         self.control_id = control_id
@@ -133,6 +318,10 @@ class ControlNetDemoCallback(pl.Callback):
         self.demo_melody_similarity_csv = demo_melody_similarity_csv
         self.demo_melody_similarity_feature = demo_melody_similarity_feature
         self.demo_melody_similarity_top_k = int(demo_melody_similarity_top_k)
+        self.demo_control_diagnostics = bool(demo_control_diagnostics)
+        self.demo_control_diagnostics_csv = demo_control_diagnostics_csv
+        self.stop_on_collapse = bool(stop_on_collapse)
+        self.collapse_cosine_threshold = float(collapse_cosine_threshold)
 
     def _resolve_control_scales(
         self,
@@ -180,7 +369,14 @@ class ControlNetDemoCallback(pl.Callback):
             f"_{variant}"
         )
 
-    def make_variant_reals(self, reals: torch.Tensor, variant: str, *, shuffle_by_time: bool = False) -> torch.Tensor:
+    def make_variant_reals(
+        self,
+        reals: torch.Tensor,
+        variant: str,
+        *,
+        shuffle_by_time: bool = False,
+    ) -> torch.Tensor | None:
+        variant = normalize_control_variant(variant)
         if variant == "correct":
             return reals
         if variant == "shuffled":
@@ -189,6 +385,8 @@ class ControlNetDemoCallback(pl.Callback):
             return torch.flip(reals, dims=[-1])
         if variant == "zero":
             return torch.zeros_like(reals)
+        if variant == "null":
+            return None
         raise ValueError(f"Unknown control variant: {variant}")
 
     def load_demo_control_audio(self, device: torch.device) -> torch.Tensor:
@@ -209,6 +407,12 @@ class ControlNetDemoCallback(pl.Callback):
             return path
         return Path(default_root_dir) / path
 
+    def _control_diagnostics_csv_path(self, default_root_dir: str | Path) -> Path:
+        path = Path(self.demo_control_diagnostics_csv)
+        if path.is_absolute():
+            return path
+        return Path(default_root_dir) / path
+
     def _write_similarity_row(self, path: Path, row: dict[str, tp.Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_header = not path.exists()
@@ -217,6 +421,175 @@ class ControlNetDemoCallback(pl.Callback):
             if write_header:
                 writer.writeheader()
             writer.writerow({field: row.get(field, "") for field in DEMO_MELODY_SIMILARITY_FIELDS})
+
+    def _write_control_diagnostic_row(self, path: Path, row: dict[str, tp.Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not path.exists()
+        with path.open("a", encoding="utf-8", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=DEMO_CONTROL_DIAGNOSTIC_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({field: row.get(field, "") for field in DEMO_CONTROL_DIAGNOSTIC_FIELDS})
+
+    def _build_conditioning_for_variant(
+        self,
+        *,
+        diffusion,
+        melody_augmenter,
+        demo_cond,
+        device: torch.device,
+        variant: str,
+    ) -> dict[str, tp.Any]:
+        if normalize_control_variant(variant) == "null":
+            base_conditioner = getattr(melody_augmenter, "base_conditioner", None)
+            if base_conditioner is not None:
+                conditioning = base_conditioner(demo_cond, device)
+            else:
+                conditioning = diffusion.conditioner(demo_cond, device)
+            conditioning = dict(conditioning)
+            conditioning.pop(self.control_id, None)
+            return conditioning
+        return diffusion.conditioner(demo_cond, device)
+
+    def _extract_control_input_for_diagnostics(
+        self,
+        *,
+        diffusion,
+        conditioning: dict[str, tp.Any],
+        target_len: int,
+        device: torch.device,
+        fallback_dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        extract = getattr(diffusion, "_extract_control_input", None)
+        if extract is None:
+            return None
+        try:
+            model_dtype = next(diffusion.model.parameters()).dtype
+        except Exception:  # noqa: BLE001
+            model_dtype = fallback_dtype
+        return extract(
+            cond=conditioning,
+            target_len=int(target_len),
+            dtype=model_dtype,
+            device=device,
+        )
+
+    def _compute_forward_delta(
+        self,
+        *,
+        diffusion,
+        noise: torch.Tensor,
+        control_input: torch.Tensor | None,
+        control_scale: float,
+    ) -> torch.Tensor | None:
+        model = getattr(diffusion, "model", None)
+        if model is None:
+            return None
+        x = noise.detach()
+        try:
+            model_dtype = next(model.parameters()).dtype
+        except Exception:  # noqa: BLE001
+            model_dtype = x.dtype
+        x = x.to(dtype=model_dtype)
+        t = torch.full((x.shape[0],), 0.5, device=x.device, dtype=model_dtype)
+        kwargs: dict[str, tp.Any] = {
+            "cfg_scale": 1.0,
+            "cfg_dropout_prob": 0.0,
+            "control_input": None if control_input is None else control_input.to(device=x.device, dtype=model_dtype),
+            "use_checkpointing": False,
+        }
+        try:
+            with torch.no_grad():
+                base_output = model(x, t, control_scale=0.0, **kwargs)
+                controlled_output = model(x, t, control_scale=float(control_scale), **kwargs)
+        except TypeError:
+            kwargs.pop("use_checkpointing", None)
+            with torch.no_grad():
+                base_output = model(x, t, control_scale=0.0, **kwargs)
+                controlled_output = model(x, t, control_scale=float(control_scale), **kwargs)
+        return (controlled_output.detach() - base_output.detach()).to(torch.float32).cpu()
+
+    def _control_diagnostic_base_row(
+        self,
+        *,
+        step: int,
+        demo_index: int,
+        cfg_scale: float,
+        control_scale: float,
+        variant: str,
+        control_input: torch.Tensor | None,
+        forward_delta: torch.Tensor | None,
+        fake: torch.Tensor | None,
+    ) -> dict[str, tp.Any]:
+        row: dict[str, tp.Any] = {
+            "step": int(step),
+            "demo_index": int(demo_index),
+            "cfg_scale": float(cfg_scale),
+            "control_scale": float(control_scale),
+            "variant": variant,
+            "row_type": "variant",
+        }
+        if control_input is not None:
+            row.update(
+                {
+                    "control_input_rms": _tensor_rms(control_input),
+                    "control_input_mean_abs": _tensor_mean_abs(control_input),
+                    "control_input_zero_ratio": _tensor_zero_ratio(control_input),
+                }
+            )
+        if forward_delta is not None:
+            row.update(
+                {
+                    "forward_delta_rms": _tensor_rms(forward_delta),
+                    "forward_delta_mean_abs": _tensor_mean_abs(forward_delta),
+                    "forward_delta_zero_ratio": _tensor_zero_ratio(forward_delta),
+                    "forward_delta_frame_active_ratio": _frame_active_ratio(forward_delta),
+                }
+            )
+        if fake is not None:
+            row.update(compute_audio_spectral_stats(fake, sample_rate=int(self.sample_rate)))
+        return row
+
+    def _maybe_write_pairwise_collapse_row(
+        self,
+        *,
+        trainer,
+        cfg_scale: float,
+        control_scale: float,
+        step: int,
+        deltas_for_combo: dict[str, torch.Tensor],
+    ) -> None:
+        correct = deltas_for_combo.get("correct")
+        shuffled = deltas_for_combo.get("shuffled")
+        if correct is None or shuffled is None:
+            return
+        stats = compute_pairwise_delta_stats(correct, shuffled)
+        warning = ""
+        if float(control_scale) > 0.0 and stats["cosine"] >= self.collapse_cosine_threshold:
+            warning = (
+                "correct/shuffled forward_delta collapse: "
+                f"cosine={stats['cosine']:.4f} >= {self.collapse_cosine_threshold:.4f}"
+            )
+            print(f"[ControlNetDemoDiagnostics] WARNING step={step} {warning}")
+            if self.stop_on_collapse:
+                trainer.should_stop = True
+        row = {
+            "step": int(step),
+            "demo_index": "",
+            "cfg_scale": float(cfg_scale),
+            "control_scale": float(control_scale),
+            "variant": "correct_vs_shuffled",
+            "row_type": "pairwise",
+            "variant_a": "correct",
+            "variant_b": "shuffled",
+            "forward_delta_cosine": stats["cosine"],
+            "forward_delta_relative_l2_difference": stats["relative_l2_difference"],
+            "warning": warning,
+        }
+        self._write_control_diagnostic_row(
+            self._control_diagnostics_csv_path(trainer.default_root_dir),
+            row,
+        )
 
     def _log_similarity_metrics(
         self,
@@ -470,8 +843,11 @@ class ControlNetDemoCallback(pl.Callback):
 
         noise = torch.randn([demo_count, diffusion.io_channels, demo_samples]).to(module.device)
 
+        forward_deltas_by_combo: dict[tuple[float, float], dict[str, torch.Tensor]] = {}
+        pairwise_written_combos: set[tuple[float, float]] = set()
         try:
             for cfg_scale, control_scale, variant in self.iter_control_demo_combinations():
+                variant = normalize_control_variant(variant)
                 print(f"[ControlNetDemo] cfg_scale={cfg_scale} control_scale={control_scale} variant={variant}")
 
                 variant_reals = None
@@ -482,10 +858,37 @@ class ControlNetDemoCallback(pl.Callback):
                         variant,
                         shuffle_by_time=external_control_reals is not None,
                     )
-                    melody_augmenter.set_batch_audio(variant_reals)
+                    if variant_reals is not None:
+                        melody_augmenter.set_batch_audio(variant_reals)
 
                 with torch.cuda.amp.autocast():
-                    conditioning = diffusion.conditioner(demo_cond, module.device)
+                    conditioning = self._build_conditioning_for_variant(
+                        diffusion=diffusion,
+                        melody_augmenter=melody_augmenter,
+                        demo_cond=demo_cond,
+                        device=module.device,
+                        variant=variant,
+                    )
+
+                control_input = None
+                forward_delta = None
+                if self.demo_control_diagnostics:
+                    control_input = self._extract_control_input_for_diagnostics(
+                        diffusion=diffusion,
+                        conditioning=conditioning,
+                        target_len=int(demo_samples),
+                        device=module.device,
+                        fallback_dtype=noise.dtype,
+                    )
+                    forward_delta = self._compute_forward_delta(
+                        diffusion=diffusion,
+                        noise=noise,
+                        control_input=control_input,
+                        control_scale=float(control_scale),
+                    )
+                    if forward_delta is not None:
+                        combo_key = (float(cfg_scale), float(control_scale))
+                        forward_deltas_by_combo.setdefault(combo_key, {})[variant] = forward_delta
 
                 # --- 3. 直接传 cond=conditioning 给 wrapper ---
                 # ControlConditionedDiffusionWrapper.forward 内部会：
@@ -516,13 +919,7 @@ class ControlNetDemoCallback(pl.Callback):
                 for demo_index, fake in enumerate(fakes):
                     demo_suffix = f"_demo_{demo_index:02d}" if demo_count > 1 else ""
                     filename = f"{trainer.default_root_dir}/{stem}{demo_suffix}.wav"
-                    fakes_out = (
-                        fake.to(torch.float32)
-                        .div(torch.max(torch.abs(fake)))
-                        .mul(32767)
-                        .to(torch.int16)
-                        .cpu()
-                    )
+                    fakes_out = normalize_audio_for_wav(fake)
                     sf.write(filename, fakes_out.cpu().numpy().T, self.sample_rate)
                     log_audio(
                         trainer.logger,
@@ -548,6 +945,42 @@ class ControlNetDemoCallback(pl.Callback):
                         demo_index=demo_index,
                         audio_path=filename,
                     )
+                    if self.demo_control_diagnostics:
+                        row = self._control_diagnostic_base_row(
+                            step=trainer.global_step,
+                            demo_index=demo_index,
+                            cfg_scale=float(cfg_scale),
+                            control_scale=float(control_scale),
+                            variant=variant,
+                            control_input=control_input,
+                            forward_delta=forward_delta,
+                            fake=fake,
+                        )
+                        self._write_control_diagnostic_row(
+                            self._control_diagnostics_csv_path(trainer.default_root_dir),
+                            row,
+                        )
+
+                if self.demo_control_diagnostics:
+                    combo_key = (float(cfg_scale), float(control_scale))
+                    deltas_for_combo = forward_deltas_by_combo.get(combo_key, {})
+                    should_write_pairwise = (
+                        combo_key not in pairwise_written_combos
+                        and "correct" in deltas_for_combo
+                        and "shuffled" in deltas_for_combo
+                    )
+                else:
+                    should_write_pairwise = False
+
+                if should_write_pairwise:
+                    self._maybe_write_pairwise_collapse_row(
+                        trainer=trainer,
+                        cfg_scale=float(cfg_scale),
+                        control_scale=float(control_scale),
+                        step=trainer.global_step,
+                        deltas_for_combo=deltas_for_combo,
+                    )
+                    pairwise_written_combos.add(combo_key)
 
         finally:
             module.train()

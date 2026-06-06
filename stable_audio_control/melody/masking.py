@@ -215,6 +215,71 @@ def zero_melody_frames_from_padding_mask(
     return _restore_melody_shape(masked, squeezed)
 
 
+def _normalize_frame_energy(
+    frame_energy: torch.Tensor,
+    *,
+    batch_size: int,
+    frame_count: int,
+    device: torch.device,
+) -> torch.Tensor:
+    energy = frame_energy.to(device=device, dtype=torch.float32)
+    if energy.ndim == 1:
+        energy = energy.unsqueeze(0)
+    if energy.ndim == 3 and energy.shape[1] == 1:
+        energy = energy[:, 0, :]
+    if energy.ndim != 2:
+        raise ValueError(f"frame_energy must be [F], [B,F], or [B,1,F]; got shape={tuple(energy.shape)}")
+
+    if energy.shape[0] == 1 and batch_size > 1:
+        energy = energy.expand(batch_size, -1)
+    if energy.shape[0] != batch_size:
+        raise ValueError(f"frame_energy batch size must be 1 or {batch_size}; got {energy.shape[0]}.")
+    if energy.shape[-1] != frame_count:
+        energy = F.interpolate(
+            energy[:, None, :],
+            size=max(1, int(frame_count)),
+            mode="nearest",
+        )[:, 0, :]
+    return energy.clamp_min(0.0)
+
+
+def zero_melody_frames_from_energy(
+    melody: torch.Tensor,
+    *,
+    frame_energy: torch.Tensor,
+    min_energy_ratio: float = 0.01,
+    min_energy_abs: float = 1e-8,
+) -> torch.Tensor:
+    """Set low-energy CQT frames to token 0 so silence cannot become pseudo pitch.
+
+    `frame_energy` is expected to describe the same CQT frame axis as `melody`.
+    A frame is active only when it is above both an absolute floor and a
+    per-sample max-relative floor.
+    """
+
+    if min_energy_ratio < 0.0:
+        raise ValueError("min_energy_ratio must be non-negative.")
+    if min_energy_abs < 0.0:
+        raise ValueError("min_energy_abs must be non-negative.")
+
+    melody_bcf, squeezed = _normalize_melody(melody)
+    masked = melody_bcf.clone()
+    energy = _normalize_frame_energy(
+        frame_energy,
+        batch_size=masked.shape[0],
+        frame_count=masked.shape[-1],
+        device=masked.device,
+    )
+
+    max_energy = energy.max(dim=-1, keepdim=True).values
+    relative_floor = max_energy * float(min_energy_ratio)
+    absolute_floor = torch.full_like(energy, float(min_energy_abs))
+    active_floor = torch.maximum(relative_floor, absolute_floor)
+    inactive_frames = energy <= active_floor
+    masked = masked.masked_fill(inactive_frames[:, None, :], 0)
+    return _restore_melody_shape(masked, squeezed)
+
+
 def padding_masks_from_metadata(metadata: Iterable[dict[str, Any]]) -> torch.Tensor | None:
     masks: list[torch.Tensor] = []
     for item in metadata:
