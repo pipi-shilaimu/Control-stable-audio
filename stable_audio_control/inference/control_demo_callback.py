@@ -229,6 +229,7 @@ class ControlNetDemoCallback(pl.Callback):
         score: float | None,
         cqt_top1_score: float | None,
         cqt_topk_score: float | None,
+        metric_prefix: str = "",
     ) -> None:
         logger = getattr(trainer, "logger", None)
         log_metrics = getattr(logger, "log_metrics", None)
@@ -243,13 +244,72 @@ class ControlNetDemoCallback(pl.Callback):
         )
         metrics: dict[str, float] = {}
         if score is not None:
-            metrics[f"{prefix}/score"] = float(score)
+            metrics[f"{prefix}/{metric_prefix}score"] = float(score)
         if cqt_top1_score is not None:
-            metrics[f"{prefix}/top1"] = float(cqt_top1_score)
+            metrics[f"{prefix}/{metric_prefix}top1"] = float(cqt_top1_score)
         if cqt_topk_score is not None:
-            metrics[f"{prefix}/topk"] = float(cqt_topk_score)
+            metrics[f"{prefix}/{metric_prefix}topk"] = float(cqt_topk_score)
         if metrics:
             log_metrics(metrics, step=step)
+
+    def _score_and_write_similarity_row(
+        self,
+        *,
+        trainer,
+        extractor,
+        base_row: dict[str, tp.Any],
+        reference_reals: torch.Tensor,
+        fake: torch.Tensor,
+        demo_index: int,
+        metric_name_prefix: str = "",
+        log_metric_prefix: str = "",
+    ) -> tuple[float | None, float | None, float | None]:
+        reference_audio = reference_reals[demo_index : demo_index + 1]
+        generated_audio = fake.unsqueeze(0) if fake.ndim == 2 else fake
+        metadata = compare_audio_tensors_melody_similarity(
+            reference_audio,
+            generated_audio,
+            extractor=extractor,
+            feature=tp.cast(tp.Any, self.demo_melody_similarity_feature),
+            sample_rate=int(self.sample_rate),
+            sample_size=int(self.demo_samples),
+            top_k=int(self.demo_melody_similarity_top_k),
+        )
+        similarity = metadata["similarity"]
+        score = float(similarity["score"])
+        row = dict(base_row)
+        row.update(
+            {
+                "metric_name": f"{metric_name_prefix}{similarity['metric_name']}",
+                "score": score,
+                "matched_tokens": similarity.get("matched_tokens", ""),
+                "total_tokens": similarity.get("total_tokens", ""),
+                "compared_frames": similarity.get("compared_frames", ""),
+            }
+        )
+
+        cqt_top1_score = None
+        cqt_topk_score = score if similarity["metric_name"] == "cqt_topk_pitch_overlap_rate" else None
+        row["cqt_topk_score"] = "" if cqt_topk_score is None else cqt_topk_score
+        additional = similarity.get("additional_metrics", {})
+        cqt_top1 = additional.get("cqt_top1_accuracy") if isinstance(additional, dict) else None
+        if isinstance(cqt_top1, dict):
+            cqt_top1_score = float(cqt_top1["score"])
+            row["cqt_top1_score"] = cqt_top1_score
+
+        self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+        self._log_similarity_metrics(
+            trainer,
+            cfg_scale=float(base_row["cfg_scale"]),
+            control_scale=float(base_row["control_scale"]),
+            variant=str(base_row["variant"]),
+            step=int(base_row["step"]),
+            score=score,
+            cqt_top1_score=cqt_top1_score,
+            cqt_topk_score=cqt_topk_score,
+            metric_prefix=log_metric_prefix,
+        )
+        return score, cqt_top1_score, cqt_topk_score
 
     def score_demo_melody_similarity(
         self,
@@ -257,6 +317,7 @@ class ControlNetDemoCallback(pl.Callback):
         trainer,
         melody_augmenter,
         reference_reals: torch.Tensor | None,
+        original_reference_reals: torch.Tensor | None,
         fake: torch.Tensor,
         cfg_scale: float,
         control_scale: float,
@@ -268,7 +329,7 @@ class ControlNetDemoCallback(pl.Callback):
         if not self.demo_melody_similarity:
             return
 
-        row: dict[str, tp.Any] = {
+        base_row: dict[str, tp.Any] = {
             "step": int(step),
             "demo_index": int(demo_index),
             "cfg_scale": float(cfg_scale),
@@ -277,77 +338,74 @@ class ControlNetDemoCallback(pl.Callback):
             "audio_path": audio_path,
         }
 
+        extractor = getattr(melody_augmenter, "extractor", None)
+
         if variant == "zero":
+            row = dict(base_row)
             row["skipped_reason"] = "zero_control_has_no_reference_melody"
             self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
             print(
                 f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
                 f"control={control_scale} variant={variant} skipped={row['skipped_reason']}"
             )
-            return
+        else:
+            if reference_reals is None or extractor is None:
+                row = dict(base_row)
+                row["skipped_reason"] = "missing_reference_or_extractor"
+                self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+            else:
+                try:
+                    _, cqt_top1_score, cqt_topk_score = self._score_and_write_similarity_row(
+                        trainer=trainer,
+                        extractor=extractor,
+                        base_row=base_row,
+                        reference_reals=reference_reals,
+                        fake=fake,
+                        demo_index=demo_index,
+                    )
+                    print(
+                        f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
+                        f"control={control_scale} variant={variant} self_ref "
+                        f"top1={cqt_top1_score if cqt_top1_score is not None else 'n/a'} "
+                        f"topk={cqt_topk_score if cqt_topk_score is not None else 'n/a'}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    row = dict(base_row)
+                    row["skipped_reason"] = f"{type(exc).__name__}: {exc}"
+                    self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+                    print(
+                        f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
+                        f"control={control_scale} variant={variant} skipped={row['skipped_reason']}"
+                    )
 
-        extractor = getattr(melody_augmenter, "extractor", None)
-        if reference_reals is None or extractor is None:
-            row["skipped_reason"] = "missing_reference_or_extractor"
-            self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
+        if original_reference_reals is None or extractor is None:
             return
 
         try:
-            reference_audio = reference_reals[demo_index : demo_index + 1]
-            generated_audio = fake.unsqueeze(0) if fake.ndim == 2 else fake
-            metadata = compare_audio_tensors_melody_similarity(
-                reference_audio,
-                generated_audio,
+            _, cqt_top1_score, cqt_topk_score = self._score_and_write_similarity_row(
+                trainer=trainer,
                 extractor=extractor,
-                feature=tp.cast(tp.Any, self.demo_melody_similarity_feature),
-                sample_rate=int(self.sample_rate),
-                sample_size=int(self.demo_samples),
-                top_k=int(self.demo_melody_similarity_top_k),
-            )
-            similarity = metadata["similarity"]
-            score = float(similarity["score"])
-            row.update(
-                {
-                    "metric_name": similarity["metric_name"],
-                    "score": score,
-                    "matched_tokens": similarity.get("matched_tokens", ""),
-                    "total_tokens": similarity.get("total_tokens", ""),
-                    "compared_frames": similarity.get("compared_frames", ""),
-                }
-            )
-
-            cqt_top1_score = None
-            cqt_topk_score = score if similarity["metric_name"] == "cqt_topk_pitch_overlap_rate" else None
-            row["cqt_topk_score"] = "" if cqt_topk_score is None else cqt_topk_score
-            additional = similarity.get("additional_metrics", {})
-            cqt_top1 = additional.get("cqt_top1_accuracy") if isinstance(additional, dict) else None
-            if isinstance(cqt_top1, dict):
-                cqt_top1_score = float(cqt_top1["score"])
-                row["cqt_top1_score"] = cqt_top1_score
-
-            self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
-            self._log_similarity_metrics(
-                trainer,
-                cfg_scale=cfg_scale,
-                control_scale=control_scale,
-                variant=variant,
-                step=step,
-                score=score,
-                cqt_top1_score=cqt_top1_score,
-                cqt_topk_score=cqt_topk_score,
+                base_row=base_row,
+                reference_reals=original_reference_reals,
+                fake=fake,
+                demo_index=demo_index,
+                metric_name_prefix="original_ref_",
+                log_metric_prefix="original_ref_",
             )
             print(
                 f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
-                f"control={control_scale} variant={variant} "
+                f"control={control_scale} variant={variant} original_ref "
                 f"top1={cqt_top1_score if cqt_top1_score is not None else 'n/a'} "
                 f"topk={cqt_topk_score if cqt_topk_score is not None else 'n/a'}"
             )
         except Exception as exc:  # noqa: BLE001
+            row = dict(base_row)
+            row["metric_name"] = "original_ref"
             row["skipped_reason"] = f"{type(exc).__name__}: {exc}"
             self._write_similarity_row(self._similarity_csv_path(trainer.default_root_dir), row)
             print(
                 f"[ControlNetDemoSimilarity] step={step} cfg={cfg_scale} "
-                f"control={control_scale} variant={variant} skipped={row['skipped_reason']}"
+                f"control={control_scale} variant={variant} original_ref skipped={row['skipped_reason']}"
             )
 
     @rank_zero_only
@@ -417,8 +475,8 @@ class ControlNetDemoCallback(pl.Callback):
                 print(f"[ControlNetDemo] cfg_scale={cfg_scale} control_scale={control_scale} variant={variant}")
 
                 variant_reals = None
+                control_reals = external_control_reals if external_control_reals is not None else demo_reals
                 if melody_augmenter is not None:
-                    control_reals = external_control_reals if external_control_reals is not None else demo_reals
                     variant_reals = self.make_variant_reals(
                         control_reals,
                         variant,
@@ -481,6 +539,7 @@ class ControlNetDemoCallback(pl.Callback):
                         trainer=trainer,
                         melody_augmenter=melody_augmenter,
                         reference_reals=variant_reals,
+                        original_reference_reals=control_reals,
                         fake=fake,
                         cfg_scale=cfg_scale,
                         control_scale=control_scale,

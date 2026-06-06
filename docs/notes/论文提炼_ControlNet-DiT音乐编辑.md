@@ -420,7 +420,9 @@ CFG 策略也已在离线 batch inference 日志中明确：文本 CFG 可以走
 
 论文完整评估包括 melody accuracy、FDopenl3、KLpasst、CLAP、主观 MOS。Phase 1 已补两条轻量评估路径：训练 demo 生成时即时写 `demo_melody_similarity.csv`，以及事后用 `evaluate_control_variants.py` 扫描 `correct/shuffled/zero` 生成结果并输出 `melody_control_report.csv`。它们能回答：
 
-- `correct` 是否比 `shuffled` / `zero` 更接近参考旋律。
+- `correct` 是否更接近原始参考旋律。
+- `shuffled` 是否跟随 shuffled control，同时远离原始参考旋律。
+- `zero` 是否远离原始参考旋律。
 - `control_scale` 增大是否提高旋律跟随，而不是只让输出变平。
 - `--prefer-ema` 与 `--no-prefer-ema` 的离线推理是否行为不同。
 
@@ -438,7 +440,7 @@ python3 stable_audio_control/scripts/train_controlnet_dit.py \
   --demo-melody-similarity-csv demo_melody_similarity.csv
 ```
 
-训练时会在 `<default-root-dir>/demo_melody_similarity.csv` 追加每个 demo 的 `cfg_scale`、`control_scale`、`variant`、`cqt_top1_score`、`cqt_topk_score` 等字段。`zero` variant 没有有效参考旋律，会被记录为 skip，不参与 top-1 判断。
+训练时会在 `<default-root-dir>/demo_melody_similarity.csv` 追加每个 demo 的 `cfg_scale`、`control_scale`、`variant`、`metric_name`、`cqt_top1_score`、`cqt_topk_score` 等字段。无前缀的 `metric_name` 是 self-reference，即和本 variant 使用的控制旋律比较；`original_ref_...` 行统一和原始 correct control audio 比较。`zero` 的 self-reference 行没有有效参考旋律，会被记录为 skip，但仍会写 `original_ref_...` 评分行。
 
 事后扫描已生成 WAV：
 
@@ -452,7 +454,7 @@ python3 stable_audio_control/scripts/evaluate_control_variants.py \
   --output-csv outputs/debug_infer_no_ema/melody_control_report.csv
 ```
 
-判读方式：如果同一 seed / control_scale 下 `correct` 的 top-1 accuracy 明显高于 `shuffled` 和 `zero`，说明 melody control 至少在推理输出中留下了可测信号；如果三者接近，优先检查 checkpoint、EMA 路径、control scale 与 demo/inference 是否同配置。
+判读方式：如果同一 seed / control_scale 下 `correct` 的 original-reference 分数高，`shuffled` 的 self-reference 分数高但 original-reference 分数低，`zero` 的 original-reference 分数低，说明 melody control 至少在推理输出中留下了可测且可替换的旋律信号；如果三者在 original-reference 上都接近，优先检查 checkpoint、EMA 路径、control scale 与 demo/inference 是否同配置。
 
 ## 8. 当前建议推进顺序
 

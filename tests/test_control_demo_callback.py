@@ -511,21 +511,121 @@ class ControlDemoCallbackTests(unittest.TestCase):
             with (Path(tmp) / "metrics.csv").open("r", encoding="utf-8", newline="") as fp:
                 rows = list(csv.DictReader(fp))
 
-        self.assertEqual(len(compare_calls), 1)
+        self.assertEqual(len(compare_calls), 2)
         self.assertEqual(compare_calls[0][2]["feature"], "cqt")
         self.assertEqual(compare_calls[0][2]["top_k"], 1)
         self.assertEqual(compare_calls[0][2]["sample_size"], 6)
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(compare_calls[1][2]["feature"], "cqt")
+        self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["step"], "1")
         self.assertEqual(rows[0]["variant"], "correct")
         self.assertEqual(rows[0]["control_scale"], "0.3")
+        self.assertEqual(rows[0]["metric_name"], "cqt_topk_pitch_overlap_rate")
         self.assertEqual(rows[0]["cqt_top1_score"], "0.75")
         self.assertEqual(rows[0]["cqt_topk_score"], "0.5")
+        self.assertEqual(rows[1]["metric_name"], "original_ref_cqt_topk_pitch_overlap_rate")
+        self.assertEqual(rows[1]["cqt_top1_score"], "0.75")
+        self.assertEqual(rows[1]["cqt_topk_score"], "0.5")
         self.assertEqual(logged_metrics[0][1], 1)
         self.assertIn(
             "demo_melody_similarity/cfg_3_control_0p3_correct/top1",
             logged_metrics[0][0],
         )
+        self.assertIn(
+            "demo_melody_similarity/cfg_3_control_0p3_correct/original_ref_top1",
+            logged_metrics[1][0],
+        )
+
+    def test_train_batch_end_scores_original_reference_for_shuffled_and_zero_variants(self) -> None:
+        module = _load_callback_module()
+        compare_calls = []
+
+        def fake_compare_audio_tensors_melody_similarity(reference_audio, generated_audio, **kwargs):
+            compare_calls.append((reference_audio.clone(), generated_audio.clone(), kwargs))
+            score = 0.1 * len(compare_calls)
+            return {
+                "similarity": {
+                    "metric_name": "cqt_topk_pitch_overlap_rate",
+                    "score": score,
+                    "matched_tokens": len(compare_calls),
+                    "total_tokens": 10,
+                    "compared_frames": 5,
+                    "additional_metrics": {
+                        "cqt_top1_accuracy": {
+                            "metric_name": "cqt_top1_pitch_accuracy",
+                            "score": score + 0.01,
+                            "matched_tokens": len(compare_calls),
+                            "total_tokens": 10,
+                            "compared_frames": 5,
+                        }
+                    },
+                }
+            }
+
+        module.compare_audio_tensors_melody_similarity = fake_compare_audio_tensors_melody_similarity
+        module.sample = lambda model, noise, steps, eta, **kwargs: noise + 1.0
+        module.sf.write = lambda *args, **kwargs: None
+        module.log_audio = lambda *args, **kwargs: None
+        module.log_image = lambda *args, **kwargs: None
+        module.audio_spectrogram_image = lambda audio: audio
+
+        class MelodyAugmenter:
+            extractor = object()
+
+            def set_batch_audio(self, audio: torch.Tensor) -> None:
+                pass
+
+        class Diffusion:
+            io_channels = 1
+            pretransform = None
+
+            def conditioner(self, cond, device):
+                return {"ok": True}
+
+        module_under_test = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            diffusion=Diffusion(),
+            melody_augmenter=MelodyAugmenter(),
+            eval=lambda: None,
+            train=lambda: None,
+        )
+        reals = torch.arange(1 * 1 * 6, dtype=torch.float32).reshape(1, 1, 6)
+        metadata = [{"prompt": "batch prompt"}]
+        callback = module.ControlNetDemoCallback(
+            demo_every=1,
+            num_demos=1,
+            sample_size=6,
+            sample_rate=44_100,
+            demo_cfg_scales=[3],
+            control_scales=[1.0],
+            control_variants=["shuffled", "zero"],
+            demo_melody_similarity=True,
+            demo_melody_similarity_csv="metrics.csv",
+            demo_melody_similarity_feature="cqt",
+            demo_melody_similarity_top_k=1,
+        )
+
+        with TemporaryDirectory() as tmp:
+            trainer = types.SimpleNamespace(global_step=1, default_root_dir=tmp, logger=object())
+            callback.on_train_batch_end(trainer, module_under_test, None, (reals, metadata), 0)
+            with (Path(tmp) / "metrics.csv").open("r", encoding="utf-8", newline="") as fp:
+                rows = list(csv.DictReader(fp))
+
+        self.assertEqual(len(compare_calls), 3)
+        torch.testing.assert_close(compare_calls[0][0], torch.flip(reals, dims=[-1]))
+        torch.testing.assert_close(compare_calls[1][0], reals)
+        torch.testing.assert_close(compare_calls[2][0], reals)
+        self.assertEqual(
+            [(row["variant"], row["metric_name"], row["skipped_reason"]) for row in rows],
+            [
+                ("shuffled", "cqt_topk_pitch_overlap_rate", ""),
+                ("shuffled", "original_ref_cqt_topk_pitch_overlap_rate", ""),
+                ("zero", "", "zero_control_has_no_reference_melody"),
+                ("zero", "original_ref_cqt_topk_pitch_overlap_rate", ""),
+            ],
+        )
+        self.assertEqual(rows[1]["cqt_topk_score"], "0.2")
+        self.assertEqual(rows[3]["cqt_top1_score"], "0.31000000000000005")
 
 
 if __name__ == "__main__":

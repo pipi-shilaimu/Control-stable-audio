@@ -155,15 +155,21 @@ CSV 主要字段：
 | `cfg_scale` | 本条 demo 使用的 CFG scale |
 | `control_scale` | 本条 demo 使用的 control scale |
 | `variant` | `correct`、`shuffled` 或 `zero` |
+| `metric_name` | 指标名。无前缀表示 self-reference；`original_ref_...` 表示统一和原始 correct control audio 比较 |
 | `cqt_top1_score` | 参考与生成音频 top-1 CQT pitch token 的 frame-wise accuracy |
 | `cqt_topk_score` | 参考与生成音频 top-k CQT pitch overlap rate |
-| `skipped_reason` | 跳过评分原因。`zero` variant 没有有效参考旋律，会记录为 skip |
+| `skipped_reason` | 跳过评分原因。`zero` 的 self-reference 行没有有效参考旋律，会记录为 skip，但仍会额外写 `original_ref_...` 评分行 |
+
+每个非 `zero` variant 默认会写两类行：
+
+- `metric_name=cqt_topk_pitch_overlap_rate`：self-reference，生成音频和本 variant 使用的控制旋律比较。`shuffled` 分数高表示模型可能跟随 shuffled control，不一定是坏事。
+- `metric_name=original_ref_cqt_topk_pitch_overlap_rate`：original-reference，所有 variant 都和原始 correct control audio 比较。这个字段用于判断 `shuffled` / `zero` 是否仍然贴着原旋律。
 
 **诊断标准**：
-- `correct` 有明显旋律跟随，`zero` 没有 → ControlNet 在工作
-- `correct` 和 `shuffled` 旋律明显不同 → 模型在"听"控制，不是盲加残差
+- `correct` 的 self-reference 和 original-reference 都高，且 `control_scale=1` 高于 `control_scale=0` → ControlNet 在工作
+- `shuffled` 的 self-reference 高、original-reference 低 → 模型在"听"控制，不是盲贴原旋律
+- `zero` 的 original-reference 低 → 全零控制确实削弱原旋律跟随
 - 三个 variant 没区别 → 控制分支未学会听从控制信号
-- `correct` 的 `cqt_top1_score` 明显高于 `shuffled`，且 `control_scale=1` 高于 `control_scale=0` → 旋律控制在可测指标上成立
 
 ## 旋律特征：CQT
 
